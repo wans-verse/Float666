@@ -119,7 +119,7 @@ class MainActivity : Activity() {
         }
         val info = TextView(this).apply {
             textSize = 16f
-            text = "Template Melayang\n\n1) Aktifkan 'Template Melayang' di Aksesibilitas.\n2) Bubble akan muncul, bisa digeser.\n3) Atur template (nama, isi, kecepatan) langsung dari bubble.\n4) Klik kolom di form, ketuk bubble, pilih template, tekan play.\n\nKetuk bubble saat berjalan untuk pause."
+            text = "Template Melayang\n\n1) Aktifkan 'Template Melayang' di Aksesibilitas.\n2) Bubble akan muncul, bisa digeser.\n3) Atur template (nama, isi, kecepatan) langsung dari bubble.\n4) Klik kolom di form, ketuk bubble, pilih template, tekan play.\n\nSaat berjalan, tombol merah ⏸ muncul di samping bubble. Ketuk itu untuk pause."
         }
         val btnAcc = Button(this).apply {
             text = "Buka Pengaturan Aksesibilitas"
@@ -214,6 +214,7 @@ class FloatService : AccessibilityService() {
     }
 
     private var loop = false
+    private var afterEnter = false
     private var warned = false
     private var waitingFocus = false
     private val pos = HashMap<String, Int>()
@@ -383,6 +384,7 @@ class FloatService : AccessibilityService() {
                             bp.x = sx + dx
                             bp.y = sy + dy
                             wm.updateViewLayout(v, bp)
+                            movePause()
                             closePanel()
                             showCloseTarget()
                             closeTarget?.scaleX = if (overTarget(ev.rawX, ev.rawY)) 1.3f else 1f
@@ -395,7 +397,7 @@ class FloatService : AccessibilityService() {
                         if (over) {
                             hideBubble()
                         } else if (!moved) {
-                            if (running) pause() else toggle()
+                            toggle()
                         }
                     }
                     MotionEvent.ACTION_CANCEL -> hideCloseTarget()
@@ -481,10 +483,70 @@ class FloatService : AccessibilityService() {
         refreshBubble()
     }
 
+    // ----- tombol pause terpisah (muncul di samping bubble saat mengetik) -----
+    private var pauseBtn: TextView? = null
+    private var pauseLp: WindowManager.LayoutParams? = null
+
+    private fun placePause() {
+        val p = pauseLp ?: return
+        val sw = resources.displayMetrics.widthPixels
+        val bw = bubble?.width?.takeIf { it > 0 } ?: dp(56)
+        p.x = if (bp.x + bw + dp(50) > sw) bp.x - dp(50) else bp.x + bw + dp(6)
+        p.y = bp.y + dp(6)
+    }
+
+    private fun showPauseBtn() {
+        if (pauseBtn != null || hidden) return
+        val t = TextView(this).apply {
+            text = "\u23F8"
+            gravity = Gravity.CENTER
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(cRed())
+            }
+            setOnClickListener { pause() }
+        }
+        val p = lp()
+        p.width = dp(44)
+        p.height = dp(44)
+        pauseLp = p
+        placePause()
+        try {
+            wm.addView(t, p)
+            pauseBtn = t
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun movePause() {
+        val t = pauseBtn ?: return
+        val p = pauseLp ?: return
+        placePause()
+        try {
+            wm.updateViewLayout(t, p)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun hidePauseBtn() {
+        pauseBtn?.let {
+            try {
+                wm.removeView(it)
+            } catch (e: Exception) {
+            }
+        }
+        pauseBtn = null
+        pauseLp = null
+    }
+
     private fun refreshBubble() {
         val l = bubble ?: return
+        if (running) showPauseBtn() else hidePauseBtn()
         if (running) {
-            l.text = (if (loop) "\u23F8\u21BB " else "\u23F8 ") + idx.toString() + "/" + lines.size.toString()
+            l.text = (if (loop) "\u21BB " else "") + idx.toString() + "/" + lines.size.toString()
+            l.post { movePause() }
             l.setTextColor(Color.WHITE)
             l.background = bubbleBg(true)
         } else if (curKey != "" && lines.isNotEmpty()) {
@@ -760,9 +822,20 @@ class FloatService : AccessibilityService() {
     }
 
     // ----- mengetik otomatis -----
+    // Teks isi kolom yang sebenarnya: bukan petunjuk (hint) dan bukan sisa sebelum terkirim.
+    private fun currentText(node: AccessibilityNodeInfo): String {
+        if (afterEnter) return ""
+        if (node.isShowingHintText) return ""
+        val s = node.text?.toString() ?: ""
+        val hint = node.hintText?.toString()
+        if (hint != null && hint == s) return ""
+        return s
+    }
+
     private fun paste(node: AccessibilityNodeInfo, t: String) {
+        val before = currentText(node)
+        afterEnter = false
         if (Store.pasteMode(this) == 1) {
-            val before = if (node.isShowingHintText) "" else (node.text?.toString() ?: "")
             val a = Bundle()
             a.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, before + t)
             if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)) return
@@ -776,9 +849,8 @@ class FloatService : AccessibilityService() {
         }
         cm.setPrimaryClip(clip)
         if (!node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
-            val cur = node.text?.toString() ?: ""
             val args = Bundle()
-            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cur + t)
+            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, before + t)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
         }
     }
@@ -810,6 +882,7 @@ class FloatService : AccessibilityService() {
                 ok = n?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id) ?: false
             }
         }
+        afterEnter = ok
         if (!ok && !warned) {
             warned = true
             toast("Enter gagal. Coba ganti Cara Enter di pengaturan (ikon gerigi)")
@@ -846,6 +919,7 @@ class FloatService : AccessibilityService() {
         waitingFocus = false
         loop = repeat
         warned = false
+        afterEnter = false
         val key = keyOf(t)
         if (key != curKey) needEnter = false
         lines = ls
@@ -918,6 +992,7 @@ class FloatService : AccessibilityService() {
         h.removeCallbacksAndMessages(null)
         if (instance === this) instance = null
         hideCloseTarget()
+        hidePauseBtn()
         closePanel()
         closeEditor()
         bubble?.let {
