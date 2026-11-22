@@ -691,9 +691,8 @@ class FloatService : AccessibilityService() {
         if (ms == 0) {
             h.postDelayed({
                 pressEnter()
-                waitingFocus = true
-                h.postDelayed(proceed, 200)
-            }, 60)
+                h.postDelayed({ step() }, 40)
+            }, 20)
         } else {
             h.postDelayed({
                 pressEnter()
