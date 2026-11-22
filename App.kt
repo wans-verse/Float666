@@ -121,6 +121,11 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (!pickMode) FloatService.instance?.showBubble()
+    }
+
     private fun openPicker() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
         i.addCategory(Intent.CATEGORY_OPENABLE)
@@ -187,7 +192,15 @@ class FloatService : AccessibilityService() {
     private var idx = 0
     private var curKey = ""
     private var needEnter = false
+    private var closeTarget: TextView? = null
+    private var hidden = false
+
+    companion object {
+        var instance: FloatService? = null
+    }
+
     private var loop = false
+    private var warned = false
     private var waitingFocus = false
     private val pos = HashMap<String, Int>()
     private val proceed = Runnable {
@@ -318,6 +331,7 @@ class FloatService : AccessibilityService() {
 
     // ----- bubble -----
     override fun onServiceConnected() {
+        instance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         bp = lp().apply {
             x = dp(8)
@@ -356,17 +370,100 @@ class FloatService : AccessibilityService() {
                             bp.y = sy + dy
                             wm.updateViewLayout(v, bp)
                             closePanel()
+                            showCloseTarget()
+                            closeTarget?.scaleX = if (overTarget(ev.rawX, ev.rawY)) 1.3f else 1f
+                            closeTarget?.scaleY = if (overTarget(ev.rawX, ev.rawY)) 1.3f else 1f
                         }
                     }
-                    MotionEvent.ACTION_UP -> if (!moved) {
-                        if (running) pause() else toggle()
+                    MotionEvent.ACTION_UP -> {
+                        val over = moved && overTarget(ev.rawX, ev.rawY)
+                        hideCloseTarget()
+                        if (over) {
+                            hideBubble()
+                        } else if (!moved) {
+                            if (running) pause() else toggle()
+                        }
                     }
+                    MotionEvent.ACTION_CANCEL -> hideCloseTarget()
                 }
                 return true
             }
         })
         wm.addView(b, bp)
         bubble = b
+        refreshBubble()
+    }
+
+    // ----- tutup bubble: tarik ke bawah tengah layar -----
+    private fun overTarget(x: Float, y: Float): Boolean {
+        val dm = resources.displayMetrics
+        return y > dm.heightPixels - dp(170) && Math.abs(x - dm.widthPixels / 2f) < dp(90)
+    }
+
+    private fun showCloseTarget() {
+        if (closeTarget != null) return
+        val t = TextView(this).apply {
+            text = "\u2715"
+            gravity = Gravity.CENTER
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            alpha = 0.85f
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(cRed())
+            }
+        }
+        val p = WindowManager.LayoutParams(
+            dp(64),
+            dp(64),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        )
+        p.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        p.y = dp(60)
+        try {
+            wm.addView(t, p)
+            closeTarget = t
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun hideCloseTarget() {
+        closeTarget?.let {
+            try {
+                wm.removeView(it)
+            } catch (e: Exception) {
+            }
+        }
+        closeTarget = null
+    }
+
+    private fun hideBubble() {
+        pause()
+        closePanel()
+        closeEditor()
+        bubble?.let {
+            try {
+                wm.removeView(it)
+            } catch (e: Exception) {
+            }
+        }
+        hidden = true
+        toast("Bubble ditutup. Buka apk untuk memunculkan lagi.")
+    }
+
+    fun showBubble() {
+        if (!hidden) return
+        val b = bubble ?: return
+        bp.x = dp(8)
+        bp.y = dp(160)
+        try {
+            wm.addView(b, bp)
+        } catch (e: Exception) {
+        }
+        hidden = false
         refreshBubble()
     }
 
@@ -431,7 +528,24 @@ class FloatService : AccessibilityService() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            head.addView(txt("Template", 20f, cPrimary(), true), LinearLayout.LayoutParams(0, WRAP, 1f))
+            val hasInfo = curKey != "" && lines.isNotEmpty()
+            val info = if (!hasInfo) {
+                "Template"
+            } else {
+                val head1 = when {
+                    running -> "Mengetik " + idx + " dari " + lines.size
+                    idx >= lines.size -> "Selesai, " + lines.size + " ketikan"
+                    else -> "Berhenti di " + idx + " dari " + lines.size
+                }
+                if (idx in 1..lines.size) head1 + "\nTerakhir: " + lines[idx - 1] else head1
+            }
+            head.addView(
+                txt(info, if (hasInfo) 15f else 20f, cPrimary(), true).apply {
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(0, WRAP, 1f)
+            )
             head.addView(circleBtn("+", cBlue(), 36) {
                 closePanel()
                 showEditor(-1)
@@ -526,7 +640,7 @@ class FloatService : AccessibilityService() {
         box.addView(txt(if (cur == null) "Template baru" else "Edit template", 20f, cPrimary(), true))
         val etName = field("Nama", false)
         etName.setText(cur?.name ?: "")
-        val etText = field("Isi (satu baris = satu ketikan)", true)
+        val etText = field("Isi (satu baris = satu ketikan; {000} = hitung otomatis 000-999)", true)
         etText.setText(cur?.text ?: "")
         box.addView(etName, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
         box.addView(etText, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
@@ -619,12 +733,35 @@ class FloatService : AccessibilityService() {
         needEnter = false
         if (Build.VERSION.SDK_INT >= 30) {
             val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            n?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            val ok = n?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id) ?: false
+            if (!ok && !warned) {
+                warned = true
+                toast("Enter gagal di kolom ini (kolom tidak mendukung kirim)")
+            }
         }
     }
 
+    // Template satu baris berisi {000} diubah jadi deretan: 000, 001, ... 999.
+    // Angka di dalam {} = angka awal, jumlah digit = lebar angka (maksimal 5 digit).
+    private fun expand(text: String): List<String> {
+        val t = text.trim()
+        val m = Regex("\\{(\\d{1,5})\\}").find(t)
+        if (m != null && !t.contains("\n")) {
+            val w = m.groupValues[1].length
+            var max = 1
+            repeat(w) { max *= 10 }
+            val start = m.groupValues[1].toInt()
+            val out = ArrayList<String>()
+            for (n in start until max) {
+                out.add(t.replaceRange(m.range, n.toString().padStart(w, '0')))
+            }
+            return out
+        }
+        return t.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
     private fun play(t: Tpl, repeat: Boolean = false) {
-        val ls = t.text.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+        val ls = expand(t.text)
         if (ls.isEmpty()) return
         if ((ls.size > 1 || repeat) && Build.VERSION.SDK_INT < 30) {
             toast("Enter otomatis butuh Android 11+")
@@ -633,6 +770,7 @@ class FloatService : AccessibilityService() {
         h.removeCallbacksAndMessages(null)
         waitingFocus = false
         loop = repeat
+        warned = false
         val key = keyOf(t)
         if (key != curKey) needEnter = false
         lines = ls
@@ -703,6 +841,8 @@ class FloatService : AccessibilityService() {
 
     override fun onDestroy() {
         h.removeCallbacksAndMessages(null)
+        if (instance === this) instance = null
+        hideCloseTarget()
         closePanel()
         closeEditor()
         bubble?.let {
