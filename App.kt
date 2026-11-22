@@ -15,6 +15,7 @@ import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -55,6 +56,10 @@ import org.json.JSONObject
 
 // ===== Data template =====
 class Tpl(val name: String, val text: String, val mode: Int = 0, val loop: Boolean = false)
+
+// Pola angka: {000} (cara lama) atau angka langsung di dalam kalimat, contoh pesan000.
+// Tanpa kurung, yang dipakai adalah deretan angka paling belakang (maks 9 digit).
+val NUM_PATTERN = Regex("\\{(\\d{1,9})\\}|(\\d{1,9})(?!.*\\d)")
 
 object Store {
     fun load(c: Context): MutableList<Tpl> {
@@ -167,6 +172,130 @@ object Store {
 class MaxScroll(c: Context, private val maxH: Int) : ScrollView(c) {
     override fun onMeasure(w: Int, h: Int) {
         super.onMeasure(w, View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST))
+    }
+}
+
+// Tombol bulat dengan ikon yang digambar sendiri (tidak tergantung font/emoji HP)
+class IconBtn(c: Context, private val kind: String, private val bg: Int, private val fg: Int) : View(c) {
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val path = Path()
+    private val rect = RectF()
+
+    init {
+        setOnTouchListener { v, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> v.alpha = 0.6f
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.alpha = 1f
+            }
+            false
+        }
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val cx = w / 2f
+        val cy = h / 2f
+        fill.color = bg
+        canvas.drawCircle(cx, cy, w / 2f, fill)
+        fill.color = fg
+        line.color = fg
+        line.strokeWidth = w * 0.085f
+
+        when (kind) {
+            "play" -> {
+                line.strokeWidth = w * 0.07f
+                path.reset()
+                path.moveTo(w * 0.40f, h * 0.30f)
+                path.lineTo(w * 0.40f, h * 0.70f)
+                path.lineTo(w * 0.72f, h * 0.50f)
+                path.close()
+                canvas.drawPath(path, fill)
+                line.style = Paint.Style.STROKE
+                canvas.drawPath(path, line)
+            }
+            "pause" -> {
+                val r = w * 0.04f
+                rect.set(w * 0.33f, h * 0.29f, w * 0.45f, h * 0.71f)
+                canvas.drawRoundRect(rect, r, r, fill)
+                rect.set(w * 0.55f, h * 0.29f, w * 0.67f, h * 0.71f)
+                canvas.drawRoundRect(rect, r, r, fill)
+            }
+            "plus" -> {
+                canvas.drawLine(w * 0.30f, cy, w * 0.70f, cy, line)
+                canvas.drawLine(cx, h * 0.30f, cx, h * 0.70f, line)
+            }
+            "close" -> {
+                canvas.drawLine(w * 0.32f, h * 0.32f, w * 0.68f, h * 0.68f, line)
+                canvas.drawLine(w * 0.68f, h * 0.32f, w * 0.32f, h * 0.68f, line)
+            }
+            "edit" -> {
+                canvas.save()
+                canvas.rotate(45f, cx, cy)
+                val r = w * 0.03f
+                rect.set(cx - w * 0.07f, cy - w * 0.27f, cx + w * 0.07f, cy + w * 0.07f)
+                canvas.drawRoundRect(rect, r, r, fill)
+                path.reset()
+                path.moveTo(cx - w * 0.07f, cy + w * 0.11f)
+                path.lineTo(cx + w * 0.07f, cy + w * 0.11f)
+                path.lineTo(cx, cy + w * 0.25f)
+                path.close()
+                canvas.drawPath(path, fill)
+                canvas.restore()
+            }
+            "reset" -> {
+                val rad = w * 0.20f
+                rect.set(cx - rad, cy - rad, cx + rad, cy + rad)
+                canvas.drawArc(rect, -60f, 270f, false, line)
+                // kepala panah di ujung busur (sudut 210 derajat, searah jarum jam)
+                val a = Math.toRadians(210.0)
+                val px = cx + rad * Math.cos(a).toFloat()
+                val py = cy + rad * Math.sin(a).toFloat()
+                val tx = -Math.sin(a).toFloat()
+                val ty = Math.cos(a).toFloat()
+                val nx = -ty
+                val ny = tx
+                val hh = w * 0.13f
+                path.reset()
+                path.moveTo(px + tx * hh, py + ty * hh)
+                path.lineTo(px + nx * hh * 0.85f, py + ny * hh * 0.85f)
+                path.lineTo(px - nx * hh * 0.85f, py - ny * hh * 0.85f)
+                path.close()
+                canvas.drawPath(path, fill)
+            }
+            "gear" -> {
+                line.strokeWidth = w * 0.09f
+                for (i in 0 until 8) {
+                    val a = Math.toRadians(i * 45.0)
+                    val c = Math.cos(a).toFloat()
+                    val sn = Math.sin(a).toFloat()
+                    canvas.drawLine(cx + c * w * 0.20f, cy + sn * w * 0.20f, cx + c * w * 0.28f, cy + sn * w * 0.28f, line)
+                }
+                canvas.drawCircle(cx, cy, w * 0.21f, fill)
+                fill.color = bg
+                canvas.drawCircle(cx, cy, w * 0.09f, fill)
+            }
+            "import" -> {
+                canvas.drawLine(cx, h * 0.28f, cx, h * 0.56f, line)
+                path.reset()
+                path.moveTo(w * 0.38f, h * 0.46f)
+                path.lineTo(cx, h * 0.59f)
+                path.lineTo(w * 0.62f, h * 0.46f)
+                line.style = Paint.Style.STROKE
+                canvas.drawPath(path, line)
+                path.reset()
+                path.moveTo(w * 0.31f, h * 0.64f)
+                path.lineTo(w * 0.31f, h * 0.71f)
+                path.lineTo(w * 0.69f, h * 0.71f)
+                path.lineTo(w * 0.69f, h * 0.64f)
+                canvas.drawPath(path, line)
+            }
+        }
     }
 }
 
@@ -413,7 +542,7 @@ class FloatService : AccessibilityService() {
     private var idx = 0
     private var curKey = ""
     private var needEnter = false
-    private var closeTarget: TextView? = null
+    private var closeTarget: View? = null
     private var hidden = false
 
     companion object {
@@ -481,18 +610,38 @@ class FloatService : AccessibilityService() {
     private fun mlp(w: Int, hh: Int, l: Int, t: Int, r: Int, b: Int) =
         LinearLayout.LayoutParams(w, hh).apply { setMargins(l, t, r, b) }
 
-    private fun circleBtn(label: String, color: Int, size: Int, onClick: () -> Unit) = TextView(this).apply {
-        text = label
-        gravity = Gravity.CENTER
-        setTextColor(Color.WHITE)
-        textSize = if (label.length > 1) 10f else 16f
-        typeface = Typeface.DEFAULT_BOLD
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
+    private fun circleBtn(label: String, color: Int, size: Int, onClick: () -> Unit): View {
+        val kind = when (label) {
+            "+" -> "plus"
+            "TXT" -> "import"
+            "\u2699" -> "gear"
+            "\u270E" -> "edit"
+            "\u21BA" -> "reset"
+            "\u23F8" -> "pause"
+            "\u25B6" -> "play"
+            else -> ""
         }
-        layoutParams = mlp(dp(size), dp(size), dp(6), 0, 0, 0)
-        setOnClickListener { onClick() }
+        val lp = mlp(dp(size), dp(size), dp(6), 0, 0, 0)
+        if (kind != "") {
+            val fg = if (color == cBtnGray()) cPrimary() else Color.WHITE
+            return IconBtn(this, kind, color, fg).apply {
+                layoutParams = lp
+                setOnClickListener { onClick() }
+            }
+        }
+        return TextView(this).apply {
+            text = label
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = if (label.length > 1) 10f else 16f
+            typeface = Typeface.DEFAULT_BOLD
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(color)
+            }
+            layoutParams = lp
+            setOnClickListener { onClick() }
+        }
     }
 
     private fun setSel(v: TextView, sel: Boolean) {
@@ -598,7 +747,6 @@ class FloatService : AccessibilityService() {
                             bp.x = sx + dx
                             bp.y = sy + dy
                             wm.updateViewLayout(v, bp)
-                            movePause()
                             closePanel()
                             showCloseTarget()
                             closeTarget?.scaleX = if (overTarget(ev.rawX, ev.rawY)) 1.3f else 1f
@@ -642,7 +790,6 @@ class FloatService : AccessibilityService() {
                     wm.updateViewLayout(v, bp)
                 } catch (e: Exception) {
                 }
-                movePause()
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(a: Animator) {
@@ -669,18 +816,7 @@ class FloatService : AccessibilityService() {
 
     private fun showCloseTarget() {
         if (closeTarget != null) return
-        val t = TextView(this).apply {
-            text = "\u2715"
-            gravity = Gravity.CENTER
-            textSize = 22f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            alpha = 0.85f
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(cRed())
-            }
-        }
+        val t = IconBtn(this, "close", cRed(), Color.WHITE).apply { alpha = 0.9f }
         val p = WindowManager.LayoutParams(
             dp(64),
             dp(64),
@@ -740,64 +876,6 @@ class FloatService : AccessibilityService() {
         refreshBubble()
     }
 
-    // ----- tombol pause terpisah (muncul di samping bubble saat mengetik) -----
-    private var pauseBtn: TextView? = null
-    private var pauseLp: WindowManager.LayoutParams? = null
-
-    private fun placePause() {
-        val p = pauseLp ?: return
-        val sw = resources.displayMetrics.widthPixels
-        val bw = bubble?.width?.takeIf { it > 0 } ?: dp(64)
-        p.x = if (bp.x + bw + dp(50) > sw) bp.x - dp(50) else bp.x + bw + dp(6)
-        p.y = bp.y + dp(10)
-    }
-
-    private fun showPauseBtn() {
-        if (pauseBtn != null || hidden) return
-        val t = TextView(this).apply {
-            text = "\u23F8"
-            gravity = Gravity.CENTER
-            textSize = 18f
-            setTextColor(Color.WHITE)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(cRed())
-            }
-            setOnClickListener { pause() }
-        }
-        val p = lp()
-        p.width = dp(44)
-        p.height = dp(44)
-        pauseLp = p
-        placePause()
-        try {
-            wm.addView(t, p)
-            pauseBtn = t
-        } catch (e: Exception) {
-        }
-    }
-
-    private fun movePause() {
-        val t = pauseBtn ?: return
-        val p = pauseLp ?: return
-        placePause()
-        try {
-            wm.updateViewLayout(t, p)
-        } catch (e: Exception) {
-        }
-    }
-
-    private fun hidePauseBtn() {
-        pauseBtn?.let {
-            try {
-                wm.removeView(it)
-            } catch (e: Exception) {
-            }
-        }
-        pauseBtn = null
-        pauseLp = null
-    }
-
     private fun setBubbleCount(l: RingBubble) {
         val total = lines.size
         val w = total.toString().length
@@ -816,7 +894,6 @@ class FloatService : AccessibilityService() {
 
     private fun refreshBubble() {
         val l = bubble ?: return
-        if (running) showPauseBtn() else hidePauseBtn()
         l.ringColor = cBlue()
         l.trackColor = if (dark()) Color.parseColor("#44FFFFFF") else Color.parseColor("#26000000")
         if (curKey != "" && lines.isNotEmpty()) {
@@ -826,7 +903,6 @@ class FloatService : AccessibilityService() {
             setBubbleCount(l)
             l.setTextColor(if (running) cBlue() else cPrimary())
             l.background = bubbleBg(running)
-            if (running) l.post { movePause() }
         } else {
             l.progress = 0f
             l.showTrack = false
@@ -1053,7 +1129,7 @@ class FloatService : AccessibilityService() {
         box.addView(txt(if (cur == null) "Template baru" else "Edit template", 20f, cPrimary(), true))
         val etName = field("Nama", false)
         etName.setText(cur?.name ?: "")
-        val etText = field("Isi (satu baris = satu ketikan; {000} = hitung otomatis, maks 9 digit)", true)
+        val etText = field("Isi (satu baris = satu ketikan; mode Angka: tulis angka awal, contoh pesan000)", true)
         etText.setText(cur?.text ?: "")
         box.addView(etName, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
         box.addView(etText, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
@@ -1069,7 +1145,7 @@ class FloatService : AccessibilityService() {
             setSel(pNum, selMode == 1)
             setSel(pOnce, !selLoop)
             setSel(pLoop, selLoop)
-            etText.hint = if (selMode == 1) "Pola angka satu baris, contoh: pesan{000} (000-999)" else "Isi (satu baris = satu ketikan)"
+            etText.hint = if (selMode == 1) "Satu baris berisi angka, contoh: pesan000 (jalan 000 sampai 999)" else "Isi (satu baris = satu ketikan)"
         }
         pStd.setOnClickListener { selMode = 0; refreshSel() }
         pNum.setOnClickListener { selMode = 1; refreshSel() }
@@ -1111,8 +1187,8 @@ class FloatService : AccessibilityService() {
                 toast("Isi template masih kosong")
                 return@pill
             }
-            if (selMode == 1 && (tx.contains("\n") || !Regex("\\{\\d{1,9}\\}").containsMatchIn(tx))) {
-                toast("Mode Angka: tulis satu baris berpola, contoh pesan{000}")
+            if (selMode == 1 && (tx.contains("\n") || !NUM_PATTERN.containsMatchIn(tx))) {
+                toast("Mode Angka: tulis satu baris yang berisi angka, contoh pesan000")
                 return@pill
             }
             val all = Store.load(this)
@@ -1306,14 +1382,14 @@ class FloatService : AccessibilityService() {
         }
     }
 
-    // Template satu baris berisi {000} diubah jadi deretan: 000, 001, ... 999.
-    // Angka di dalam {} = angka awal, jumlah digit = lebar angka (maksimal 9 digit).
+    // Mode Angka: satu baris berisi angka (pesan000 atau pesan{000}) diubah jadi deretan 000, 001, ... 999.
+    // Angka itu = angka awal, jumlah digit = lebar angka (maksimal 9 digit).
     // Daftar dibuat malas: angka dihitung saat dibutuhkan, jadi 9 digit pun tidak memenuhi memori.
     private fun expand(text: String, mode: Int): List<String> {
         val t = text.trim()
-        val m = Regex("\\{(\\d{1,9})\\}").find(t)
+        val m = NUM_PATTERN.find(t)
         if (mode == 1 && m != null && !t.contains("\n")) {
-            val digits = m.groupValues[1]
+            val digits = m.groupValues[1].ifEmpty { m.groupValues[2] }
             val w = digits.length
             var max = 1L
             repeat(w) { max *= 10L }
@@ -1424,7 +1500,6 @@ class FloatService : AccessibilityService() {
         h.removeCallbacksAndMessages(null)
         if (instance === this) instance = null
         hideCloseTarget()
-        hidePauseBtn()
         closePanel()
         closeEditor()
         bubble?.let {
