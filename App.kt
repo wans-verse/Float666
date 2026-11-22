@@ -79,6 +79,20 @@ object Store {
     fun setSpeed(c: Context, v: Int) {
         c.getSharedPreferences("tpl", 0).edit().putInt("speed", v).apply()
     }
+
+    // 0 = lewat clipboard, 1 = isi teks langsung (tanpa clipboard, tanpa popup sistem)
+    fun pasteMode(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("paste", 0)
+
+    fun setPasteMode(c: Context, v: Int) {
+        c.getSharedPreferences("tpl", 0).edit().putInt("paste", v).apply()
+    }
+
+    // 0 = tombol Enter keyboard, 1 = pindah ke kolom berikutnya, 2 = ketuk tombol Kirim/Send
+    fun enterMode(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("enter", 0)
+
+    fun setEnterMode(c: Context, v: Int) {
+        c.getSharedPreferences("tpl", 0).edit().putInt("enter", v).apply()
+    }
 }
 
 // ScrollView dengan tinggi maksimal
@@ -520,6 +534,34 @@ class FloatService : AccessibilityService() {
             }
             box.addView(sb, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
             box.addView(txt("Kiri = Super Cepat, kanan = lambat", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(4), 0, 0))
+            box.addView(txt("Cara Enter", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
+            val em = Store.enterMode(this)
+            val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            listOf("Enter", "Kolom", "Kirim").forEachIndexed { i, nm ->
+                modes.addView(pill(nm, if (em == i) cBlue() else cBtnGray(), if (em == i) Color.WHITE else cPrimary()) {
+                    Store.setEnterMode(this, i)
+                    openPanel("set")
+                })
+            }
+            box.addView(modes, mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+            box.addView(
+                txt("Enter = tombol enter keyboard. Kolom = pindah ke kolom berikutnya. Kirim = ketuk tombol Kirim/Send di layar.", 12f, cGray(), false),
+                mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+            )
+            box.addView(txt("Cara tempel", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
+            val pm = Store.pasteMode(this)
+            val pastes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            listOf("Clipboard", "Langsung").forEachIndexed { i, nm ->
+                pastes.addView(pill(nm, if (pm == i) cBlue() else cBtnGray(), if (pm == i) Color.WHITE else cPrimary()) {
+                    Store.setPasteMode(this, i)
+                    openPanel("set")
+                })
+            }
+            box.addView(pastes, mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+            box.addView(
+                txt("Langsung = tanpa clipboard, jadi tidak ada popup 'disalin/ditempel' dan lebih ringan. Kalau teks tidak masuk di aplikasimu, kembali ke Clipboard.", 12f, cGray(), false),
+                mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+            )
             val done = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             done.addView(pill("Selesai", cBlue(), Color.WHITE) { openPanel("list") })
             box.addView(done, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
@@ -719,8 +761,20 @@ class FloatService : AccessibilityService() {
 
     // ----- mengetik otomatis -----
     private fun paste(node: AccessibilityNodeInfo, t: String) {
+        if (Store.pasteMode(this) == 1) {
+            val before = if (node.isShowingHintText) "" else (node.text?.toString() ?: "")
+            val a = Bundle()
+            a.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, before + t)
+            if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)) return
+        }
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("tpl", t))
+        val clip = ClipData.newPlainText("tpl", t)
+        if (Build.VERSION.SDK_INT >= 33) {
+            val ex = android.os.PersistableBundle()
+            ex.putBoolean("android.content.extra.IS_SENSITIVE", true)
+            clip.description.extras = ex
+        }
+        cm.setPrimaryClip(clip)
         if (!node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
             val cur = node.text?.toString() ?: ""
             val args = Bundle()
@@ -729,15 +783,36 @@ class FloatService : AccessibilityService() {
         }
     }
 
+    private fun clickSend(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        for (key in listOf("Kirim", "Send")) {
+            val found = root.findAccessibilityNodeInfosByText(key) ?: continue
+            for (f in found) {
+                var x: AccessibilityNodeInfo? = f
+                while (x != null && !x.isClickable) x = x.parent
+                if (x != null && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+        }
+        return false
+    }
+
     private fun pressEnter() {
         needEnter = false
-        if (Build.VERSION.SDK_INT >= 30) {
-            val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            val ok = n?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id) ?: false
-            if (!ok && !warned) {
-                warned = true
-                toast("Enter gagal di kolom ini (kolom tidak mendukung kirim)")
+        val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        var ok = false
+        when (Store.enterMode(this)) {
+            1 -> {
+                val nx = n?.focusSearch(View.FOCUS_FORWARD)
+                ok = nx?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) ?: false
             }
+            2 -> ok = clickSend()
+            else -> if (Build.VERSION.SDK_INT >= 30) {
+                ok = n?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id) ?: false
+            }
+        }
+        if (!ok && !warned) {
+            warned = true
+            toast("Enter gagal. Coba ganti Cara Enter di pengaturan (ikon gerigi)")
         }
     }
 
@@ -763,7 +838,7 @@ class FloatService : AccessibilityService() {
     private fun play(t: Tpl, repeat: Boolean = false) {
         val ls = expand(t.text)
         if (ls.isEmpty()) return
-        if ((ls.size > 1 || repeat) && Build.VERSION.SDK_INT < 30) {
+        if ((ls.size > 1 || repeat) && Build.VERSION.SDK_INT < 30 && Store.enterMode(this) == 0) {
             toast("Enter otomatis butuh Android 11+")
             return
         }
