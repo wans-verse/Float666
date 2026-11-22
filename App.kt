@@ -187,6 +187,7 @@ class FloatService : AccessibilityService() {
     private var idx = 0
     private var curKey = ""
     private var needEnter = false
+    private var loop = false
     private var waitingFocus = false
     private val pos = HashMap<String, Int>()
     private val proceed = Runnable {
@@ -372,7 +373,7 @@ class FloatService : AccessibilityService() {
     private fun refreshBubble() {
         val l = bubble ?: return
         if (running) {
-            l.text = "\u23F8 " + idx.toString() + "/" + lines.size.toString()
+            l.text = (if (loop) "\u23F8\u21BB " else "\u23F8 ") + idx.toString() + "/" + lines.size.toString()
             l.setTextColor(Color.WHITE)
             l.background = bubbleBg(true)
         } else if (curKey != "" && lines.isNotEmpty()) {
@@ -467,6 +468,10 @@ class FloatService : AccessibilityService() {
                 row.addView(circleBtn("\u270E", cBtnGray(), 36) {
                     closePanel()
                     showEditor(i)
+                })
+                row.addView(circleBtn("\u21BB", cBlue(), 36) {
+                    closePanel()
+                    play(t, true)
                 })
                 row.addView(circleBtn("\u25B6", cGreen(), 40) {
                     closePanel()
@@ -618,15 +623,16 @@ class FloatService : AccessibilityService() {
         }
     }
 
-    private fun play(t: Tpl) {
+    private fun play(t: Tpl, repeat: Boolean = false) {
         val ls = t.text.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
         if (ls.isEmpty()) return
-        if (ls.size > 1 && Build.VERSION.SDK_INT < 30) {
+        if ((ls.size > 1 || repeat) && Build.VERSION.SDK_INT < 30) {
             toast("Enter otomatis butuh Android 11+")
             return
         }
         h.removeCallbacksAndMessages(null)
         waitingFocus = false
+        loop = repeat
         val key = keyOf(t)
         if (key != curKey) needEnter = false
         lines = ls
@@ -671,8 +677,13 @@ class FloatService : AccessibilityService() {
         idx++
         pos[curKey] = idx
         if (idx >= lines.size) {
-            finish()
-            return
+            if (loop) {
+                idx = 0
+                pos[curKey] = 0
+            } else {
+                finish()
+                return
+            }
         }
         needEnter = true
         refreshBubble()
@@ -681,7 +692,7 @@ class FloatService : AccessibilityService() {
             h.postDelayed({
                 pressEnter()
                 waitingFocus = true
-                h.postDelayed(proceed, 800)
+                h.postDelayed(proceed, 200)
             }, 60)
         } else {
             h.postDelayed({
