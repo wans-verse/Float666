@@ -25,6 +25,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -559,6 +560,61 @@ class FloatService : AccessibilityService() {
         step()
     }
 
+    // info mode angka: nilai awal & lebar digit (-1 = bukan mode angka)
+    private var numStart = -1L
+    private var numW = 0
+    private var typingPkg = ""
+    private var lastStepAt = 0L
+    private var panelMode = ""
+    private var panelInfo: TextView? = null
+    private var turboNode: AccessibilityNodeInfo? = null
+    private var turboCount = 0
+    private var lastUi = 0L
+
+    // Penjaga: kalau pengetikan macet (misal pindah aplikasi / screenshot) status otomatis jadi pause
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val gap = SystemClock.uptimeMillis() - lastStepAt
+            val limit = maxOf(3000L, Store.speed(this@FloatService) * 20L * 4L)
+            if (gap > limit) {
+                pause()
+                toast("Pengetikan terhenti. Ketuk bubble lalu play untuk lanjut")
+            } else {
+                h.postDelayed(this, 1000)
+            }
+        }
+    }
+
+    private fun numMeta(t: Tpl): LongArray? {
+        if (t.mode != 1 || t.text.contains("\n")) return null
+        val m = NUM_PATTERN.find(t.text.trim()) ?: return null
+        val d = m.groupValues[1].ifEmpty { m.groupValues[2] }
+        return longArrayOf(d.toLong(), d.length.toLong())
+    }
+
+    private fun shownNow(): String =
+        if (numStart >= 0) {
+            if (idx <= 0) "\u2013" else (numStart + idx - 1).toString().padStart(numW, '0')
+        } else idx.toString()
+
+    private fun shownMax(): String =
+        if (numStart >= 0) "9".repeat(numW) else lines.size.toString()
+
+    private fun infoText(): String {
+        val hasInfo = curKey != "" && lines.isNotEmpty()
+        if (!hasInfo) return "Template"
+        val nowS = shownNow()
+        val maxS = shownMax()
+        val head1 = when {
+            running -> "Mengetik " + nowS + " dari " + maxS
+            idx >= lines.size -> if (numStart >= 0) "Selesai sampai " + maxS else "Selesai, " + lines.size + " ketikan"
+            idx <= 0 && numStart >= 0 -> "Siap mulai dari " + numStart.toString().padStart(numW, '0')
+            else -> "Berhenti di " + nowS + " dari " + maxS
+        }
+        return if (idx in 1..lines.size) head1 + "\nTerakhir: " + lines[idx - 1] else head1
+    }
+
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(e: AccessibilityEvent?) {
@@ -704,7 +760,7 @@ class FloatService : AccessibilityService() {
     private fun countLines(s: String): Int = s.split("\n").count { it.isNotBlank() }
 
     private fun speedLabel(v: Int): String =
-        if (v == 0) "Super Cepat (otomatis pindah kolom)" else (v * 20).toString() + " ms per baris"
+        if (v == 0) "Turbo (tanpa jeda, secepat mungkin)" else (v * 20).toString() + " ms per baris"
 
     // ----- bubble -----
     override fun onServiceConnected() {
@@ -877,16 +933,16 @@ class FloatService : AccessibilityService() {
     }
 
     private fun setBubbleCount(l: RingBubble) {
-        val total = lines.size
-        val w = total.toString().length
+        val maxS = shownMax()
+        val w = maxS.length
         l.textSize = when {
             w <= 3 -> 15f
             w <= 5 -> 12f
             w <= 7 -> 10f
             else -> 8.5f
         }
-        val top = idx.toString()
-        val bottom = (if (loop) "\u21BB " else "") + "/" + total.toString()
+        val top = shownNow()
+        val bottom = (if (loop) "\u21BB " else "") + "/" + maxS
         val sp = SpannableString(top + "\n" + bottom)
         sp.setSpan(RelativeSizeSpan(0.72f), top.length + 1, sp.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         l.text = sp
@@ -912,6 +968,7 @@ class FloatService : AccessibilityService() {
             l.background = bubbleBg(false)
         }
         l.invalidate()
+        panelInfo?.text = infoText()
     }
 
     private fun toggle() {
@@ -925,6 +982,7 @@ class FloatService : AccessibilityService() {
     // ----- panel daftar template / pengaturan -----
     private fun openPanel(mode: String) {
         closePanel()
+        panelMode = mode
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         if (mode == "set") {
@@ -949,7 +1007,7 @@ class FloatService : AccessibilityService() {
                 })
             }
             box.addView(sb, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
-            box.addView(txt("Kiri = Super Cepat, kanan = lambat", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(4), 0, 0))
+            box.addView(txt("Kiri = Turbo, kanan = lambat. Kalau ada pesan terlewat, geser sedikit ke kanan.", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(4), 0, 0))
             box.addView(txt("Cara Enter", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
             val em = Store.enterMode(this)
             val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -996,23 +1054,12 @@ class FloatService : AccessibilityService() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             val hasInfo = curKey != "" && lines.isNotEmpty()
-            val info = if (!hasInfo) {
-                "Template"
-            } else {
-                val head1 = when {
-                    running -> "Mengetik " + idx + " dari " + lines.size
-                    idx >= lines.size -> "Selesai, " + lines.size + " ketikan"
-                    else -> "Berhenti di " + idx + " dari " + lines.size
-                }
-                if (idx in 1..lines.size) head1 + "\nTerakhir: " + lines[idx - 1] else head1
+            val infoView = txt(infoText(), if (hasInfo) 15f else 20f, cPrimary(), true).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
             }
-            head.addView(
-                txt(info, if (hasInfo) 15f else 20f, cPrimary(), true).apply {
-                    maxLines = 2
-                    ellipsize = TextUtils.TruncateAt.END
-                },
-                LinearLayout.LayoutParams(0, WRAP, 1f)
-            )
+            panelInfo = infoView
+            head.addView(infoView, LinearLayout.LayoutParams(0, WRAP, 1f))
             head.addView(circleBtn("+", cBlue(), 36) {
                 closePanel()
                 showEditor(-1)
@@ -1044,7 +1091,15 @@ class FloatService : AccessibilityService() {
                     ellipsize = TextUtils.TruncateAt.END
                 })
                 val tag = (if (t.mode == 1) "Angka" else "Standar") + (if (t.loop) " \u00B7 ulang" else "")
-                val sub = tag + " \u00B7 " + (if (done in 1 until total) done.toString() + "/" + total.toString() + ", lanjut" else total.toString() + " baris")
+                val nm = numMeta(t)
+                val nw = nm?.get(1)?.toInt() ?: 0
+                val sub = tag + " \u00B7 " + (
+                    if (done in 1 until total) {
+                        (if (nm != null) (nm[0] + done - 1).toString().padStart(nw, '0') + "/" + "9".repeat(nw) else done.toString() + "/" + total.toString()) + ", lanjut"
+                    } else if (nm != null) {
+                        nm[0].toString().padStart(nw, '0') + " - " + "9".repeat(nw)
+                    } else total.toString() + " baris"
+                    )
                 col.addView(txt(sub, 12f, cGray(), false))
                 col.setOnLongClickListener {
                     closePanel()
@@ -1113,6 +1168,8 @@ class FloatService : AccessibilityService() {
             }
         }
         panel = null
+        panelMode = ""
+        panelInfo = null
     }
 
     // ----- editor template (nama + isi) -----
@@ -1243,26 +1300,32 @@ class FloatService : AccessibilityService() {
     private fun showJump(t: Tpl, key: String, total: Int) {
         closeEditor()
         val cur = (pos[key] ?: 0).coerceIn(0, maxOf(total - 1, 0))
+        val nm = numMeta(t)
+        val nw = nm?.get(1)?.toInt() ?: 0
+        val lo = nm?.get(0) ?: 1L
+        val hi = if (nm != null) ("9".repeat(nw)).toLong() else total.toLong()
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = glass(dp(28).toFloat())
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        box.addView(txt("Lompat ke ketikan", 20f, cPrimary(), true))
-        box.addView(txt(t.name + " \u00B7 1 sampai " + total, 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(2), 0, 0))
-        val et = field("Nomor ketikan", false).apply {
+        box.addView(txt(if (nm != null) "Lompat ke angka" else "Lompat ke ketikan", 20f, cPrimary(), true))
+        val rangeTxt = if (nm != null) lo.toString().padStart(nw, '0') + " sampai " + hi.toString() else "1 sampai " + total
+        box.addView(txt(t.name + " \u00B7 " + rangeTxt, 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(2), 0, 0))
+        val et = field(if (nm != null) "Angka" else "Nomor ketikan", false).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
-            setText((cur + 1).toString())
+            setText((lo + cur).toString())
             setSelection(text.length)
         }
         box.addView(et, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
         val preview = txt("", 13f, cBlue(), true)
         box.addView(preview, mlp(WRAP, WRAP, 0, dp(8), 0, 0))
         val src = expand(t.text, t.mode)
-        fun n(): Int = (et.text.toString().toLongOrNull() ?: 1L).coerceIn(1L, maxOf(total, 1).toLong()).toInt()
+        // indeks (mulai 0) dari angka/nomor yang diketik
+        fun n(): Int = ((et.text.toString().toLongOrNull() ?: lo).coerceIn(lo, maxOf(hi, lo)) - lo).toInt()
         fun upd() {
             val k = n()
-            preview.text = if (src.isNotEmpty()) "Mulai dari: " + src[k - 1] else ""
+            preview.text = if (src.isNotEmpty()) "Mulai dari: " + src[k] else ""
             preview.maxLines = 1
             preview.ellipsize = TextUtils.TruncateAt.END
         }
@@ -1278,7 +1341,7 @@ class FloatService : AccessibilityService() {
             openPanel("list")
         })
         btns.addView(pill("Lompat", cBlue(), Color.WHITE) {
-            val k = n() - 1
+            val k = n()
             if (running && curKey == key) pause()
             pos[key] = k
             if (curKey == key) {
@@ -1325,26 +1388,50 @@ class FloatService : AccessibilityService() {
         return s
     }
 
-    private fun paste(node: AccessibilityNodeInfo, t: String) {
+    private fun paste(node: AccessibilityNodeInfo, t: String): Boolean {
         val before = currentText(node)
         afterEnter = false
-        if (Store.pasteMode(this) == 1) {
-            val a = Bundle()
-            a.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, before + t)
-            if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)) return
-        }
-        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("tpl", t)
-        if (Build.VERSION.SDK_INT >= 33) {
-            val ex = android.os.PersistableBundle()
-            ex.putBoolean("android.content.extra.IS_SENSITIVE", true)
-            clip.description.extras = ex
-        }
-        cm.setPrimaryClip(clip)
-        if (!node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
+        try {
+            if (Store.pasteMode(this) == 1) {
+                val a = Bundle()
+                a.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, before + t)
+                if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)) return true
+            }
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = ClipData.newPlainText("tpl", t)
+            if (Build.VERSION.SDK_INT >= 33) {
+                val ex = android.os.PersistableBundle()
+                ex.putBoolean("android.content.extra.IS_SENSITIVE", true)
+                clip.description.extras = ex
+            }
+            cm.setPrimaryClip(clip)
+            if (node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) return true
             val args = Bundle()
             args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, before + t)
-            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        } catch (e: Exception) {
+            return false
+        }
+    }
+
+    // Turbo: langsung isi teks (tanpa clipboard). Kalau gagal, jatuh ke cara biasa.
+    private fun pasteTurbo(node: AccessibilityNodeInfo, t: String): Boolean {
+        afterEnter = false
+        try {
+            val a = Bundle()
+            a.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, t)
+            if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a)) return true
+        } catch (e: Exception) {
+        }
+        return paste(node, t)
+    }
+
+    // Tampilan bubble cukup diperbarui ~10x per detik supaya tidak memperlambat pengetikan
+    private fun refreshThrottled() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastUi >= 100) {
+            lastUi = now
+            refreshBubble()
         }
     }
 
@@ -1361,19 +1448,23 @@ class FloatService : AccessibilityService() {
         return false
     }
 
-    private fun pressEnter() {
+    private fun pressEnter(given: AccessibilityNodeInfo? = null) {
         needEnter = false
-        val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val n = given ?: findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         var ok = false
-        when (Store.enterMode(this)) {
-            1 -> {
-                val nx = n?.focusSearch(View.FOCUS_FORWARD)
-                ok = nx?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) ?: false
+        try {
+            when (Store.enterMode(this)) {
+                1 -> {
+                    val nx = n?.focusSearch(View.FOCUS_FORWARD)
+                    ok = nx?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) ?: false
+                }
+                2 -> ok = clickSend()
+                else -> if (Build.VERSION.SDK_INT >= 30) {
+                    ok = n?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id) ?: false
+                }
             }
-            2 -> ok = clickSend()
-            else -> if (Build.VERSION.SDK_INT >= 30) {
-                ok = n?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id) ?: false
-            }
+        } catch (e: Exception) {
+            ok = false
         }
         afterEnter = ok
         if (!ok && !warned) {
@@ -1426,6 +1517,14 @@ class FloatService : AccessibilityService() {
         idx = pos[key] ?: 0
         if (idx >= ls.size) idx = 0
         running = true
+        typingPkg = ""
+        turboNode = null
+        turboCount = 0
+        val nm = numMeta(t)
+        numStart = nm?.get(0) ?: -1L
+        numW = nm?.get(1)?.toInt() ?: 0
+        lastStepAt = SystemClock.uptimeMillis()
+        h.postDelayed(watchdog, 1000)
         refreshBubble()
         if (needEnter) {
             pressEnter()
@@ -1440,6 +1539,7 @@ class FloatService : AccessibilityService() {
         waitingFocus = false
         h.removeCallbacksAndMessages(null)
         refreshBubble()
+        if (panel != null && panelMode == "list") openPanel("list")
     }
 
     private fun finish() {
@@ -1449,17 +1549,71 @@ class FloatService : AccessibilityService() {
         h.removeCallbacksAndMessages(null)
         pos[curKey] = 0
         refreshBubble()
+        if (panel != null && panelMode == "list") openPanel("list")
     }
 
     private fun step() {
         if (!running) return
-        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        if (node == null) {
+        lastStepAt = SystemClock.uptimeMillis()
+        try {
+            stepInner()
+        } catch (e: Exception) {
             pause()
-            toast("Klik kolom ketik dulu, lalu ketuk bubble > play")
+            toast("Pengetikan dijeda karena gangguan. Ketuk play untuk lanjut")
+        }
+    }
+
+    private fun stepInner() {
+        val ms = Store.speed(this) * 20
+        val turbo = ms == 0
+        val text = lines[idx]
+
+        // Turbo memakai ulang kolom ketik yang sama dan memeriksa ulang tiap 10 ketikan
+        var node: AccessibilityNodeInfo? = null
+        var cached = false
+        if (turbo && turboNode != null && turboCount % 10 != 0 && Store.enterMode(this) != 1) {
+            node = turboNode
+            cached = true
+        }
+        turboCount++
+        if (node == null) {
+            val f = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (f == null) {
+                pause()
+                toast("Kolom ketik hilang, dijeda. Klik kolom ketik lalu ketuk bubble > play")
+                return
+            }
+            val pkg = f.packageName?.toString() ?: ""
+            if (typingPkg == "") {
+                typingPkg = pkg
+            } else if (pkg != "" && pkg != typingPkg) {
+                pause()
+                toast("Pindah aplikasi, dijeda. Kembali ke kolom ketik lalu ketuk play")
+                return
+            }
+            node = f
+            turboNode = if (turbo) f else null
+        }
+
+        var cur: AccessibilityNodeInfo = node ?: return
+        var ok = if (turbo) pasteTurbo(cur, text) else paste(cur, text)
+        if (!ok && cached) {
+            // kolom lama sudah tidak valid, cari ulang sekali
+            val fresh = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (fresh != null) {
+                cur = fresh
+                turboNode = fresh
+                ok = pasteTurbo(fresh, text)
+            }
+        }
+        if (!ok) {
+            turboNode = null
+            pause()
+            toast("Teks tidak masuk, dijeda. Klik kolom ketik lalu ketuk play")
             return
         }
-        paste(node, lines[idx])
+        val target: AccessibilityNodeInfo = cur
+
         idx++
         pos[curKey] = idx
         if (idx >= lines.size) {
@@ -1469,9 +1623,9 @@ class FloatService : AccessibilityService() {
             } else {
                 // item terakhir tetap di-Enter dulu, baru selesai
                 refreshBubble()
-                val last = Store.speed(this) * 20 * 3 / 10
+                val last = ms * 3 / 10
                 h.postDelayed({
-                    pressEnter()
+                    pressEnter(target)
                     h.postDelayed({
                         finish()
                         celebrate()
@@ -1481,16 +1635,15 @@ class FloatService : AccessibilityService() {
             }
         }
         needEnter = true
-        refreshBubble()
-        val ms = Store.speed(this) * 20
-        if (ms == 0) {
-            h.postDelayed({
-                pressEnter()
-                h.postDelayed({ step() }, 40)
-            }, 20)
+        refreshThrottled()
+        if (turbo) {
+            h.post {
+                pressEnter(target)
+                h.post { step() }
+            }
         } else {
             h.postDelayed({
-                pressEnter()
+                pressEnter(target)
                 h.postDelayed({ step() }, (ms * 7 / 10).toLong())
             }, (ms * 3 / 10).toLong())
         }
