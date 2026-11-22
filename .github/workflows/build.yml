@@ -110,6 +110,23 @@ jobs:
           </vector>
           EOF
 
+          cat > app/src/main/res/drawable/ic_tile.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp"
+              android:height="24dp"
+              android:viewportWidth="24"
+              android:viewportHeight="24">
+              <path
+                  android:pathData="M3,6 L8,18 L12,10 L16,18 L21,6"
+                  android:strokeColor="#FFFFFF"
+                  android:strokeWidth="2.4"
+                  android:strokeLineCap="round"
+                  android:strokeLineJoin="round"
+                  android:fillColor="#00000000" />
+          </vector>
+          EOF
+
           cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -160,6 +177,16 @@ jobs:
                       <meta-data
                           android:name="android.accessibilityservice"
                           android:resource="@xml/accessibility_config" />
+                  </service>
+                  <service
+                      android:name="com.wans.tpl.BubbleTile"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:icon="@drawable/ic_tile"
+                      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+                      <intent-filter>
+                          <action android:name="android.service.quicksettings.action.QS_TILE" />
+                      </intent-filter>
                   </service>
               </application>
           </manifest>
