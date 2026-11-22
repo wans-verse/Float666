@@ -8,8 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -19,7 +22,10 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.TextUtils
+import android.text.style.RelativeSizeSpan
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -37,7 +43,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 // ===== Data template =====
-class Tpl(val name: String, val text: String)
+class Tpl(val name: String, val text: String, val mode: Int = 0, val loop: Boolean = false)
 
 object Store {
     fun load(c: Context): MutableList<Tpl> {
@@ -49,7 +55,10 @@ object Store {
                 val a = JSONArray(j)
                 for (i in 0 until a.length()) {
                     val o = a.getJSONObject(i)
-                    out.add(Tpl(o.getString("n"), o.getString("c")))
+                    val body = o.getString("c")
+                    val md = if (o.has("m")) o.getInt("m")
+                    else if (body.indexOf('\n') < 0 && Regex("\\{\\d{1,9}\\}").containsMatchIn(body)) 1 else 0
+                    out.add(Tpl(o.getString("n"), body, md, o.optBoolean("l", false)))
                 }
             } catch (e: Exception) {
             }
@@ -69,6 +78,8 @@ object Store {
             val o = JSONObject()
             o.put("n", it.name)
             o.put("c", it.text)
+            o.put("m", it.mode)
+            o.put("l", it.loop)
             a.put(o)
         }
         c.getSharedPreferences("tpl", 0).edit().putString("data", a.toString()).apply()
@@ -102,6 +113,34 @@ class MaxScroll(c: Context, private val maxH: Int) : ScrollView(c) {
     }
 }
 
+// Bubble bulat dengan outline progres (biru). Penuh melingkar = selesai.
+class RingBubble(c: Context) : TextView(c) {
+    var progress = 0f
+    var showTrack = false
+    var ringColor = Color.parseColor("#007AFF")
+    var trackColor = Color.parseColor("#33808080")
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val r = RectF()
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (!showTrack) return
+        val d = resources.displayMetrics.density
+        val sw = 3.5f * d
+        val m = sw / 2f + 1f * d
+        r.set(m, m, width - m, height - m)
+        p.strokeWidth = sw
+        p.color = trackColor
+        canvas.drawOval(r, p)
+        val f = progress.coerceIn(0f, 1f)
+        if (f > 0f) {
+            p.color = ringColor
+            if (f >= 1f) canvas.drawOval(r, p)
+            else canvas.drawArc(r, -90f, 360f * f, false, p)
+        }
+    }
+}
+
 // ===== Halaman apk (aktivasi + pemilih file) =====
 class MainActivity : Activity() {
     private var pickMode = false
@@ -113,25 +152,56 @@ class MainActivity : Activity() {
             openPicker()
             return
         }
+        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        val d = resources.displayMetrics.density
+        fun dp(n: Int) = (n * d + 0.5f).toInt()
+        val blue = Color.parseColor(if (night) "#0A84FF" else "#007AFF")
+
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 23 && !night) {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(48, 120, 48, 48)
+            gravity = Gravity.CENTER
+            setPadding(dp(32), dp(48), dp(32), dp(48))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                if (night) intArrayOf(Color.parseColor("#000000"), Color.parseColor("#1C1C1E"))
+                else intArrayOf(Color.parseColor("#F2F2F7"), Color.parseColor("#E5E5EA"))
+            )
         }
-        val info = TextView(this).apply {
-            textSize = 16f
-            text = "Template Melayang\n\n1) Aktifkan 'Template Melayang' di Aksesibilitas.\n2) Bubble akan muncul, bisa digeser.\n3) Atur template (nama, isi, kecepatan) langsung dari bubble.\n4) Klik kolom di form, ketuk bubble, pilih template, tekan play.\n\nSaat berjalan, tombol merah ⏸ muncul di samping bubble. Ketuk itu untuk pause."
+        val title = TextView(this).apply {
+            text = "WansForce"
+            textSize = 36f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(if (night) Color.WHITE else Color.parseColor("#1C1C1E"))
         }
-        val btnAcc = Button(this).apply {
+        val btnAcc = TextView(this).apply {
             text = "Buka Pengaturan Aksesibilitas"
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setPadding(dp(24), 0, dp(24), 0)
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(blue, Color.parseColor(if (night) "#0060DF" else "#0A6CFF"))
+            ).apply { cornerRadius = dp(32).toFloat() }
+            setOnTouchListener { v, ev ->
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.97f).scaleY(0.97f).alpha(0.8f).setDuration(90).start()
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(140).start()
+                }
+                false
+            }
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         }
-        val btnImp = Button(this).apply {
-            text = "Impor template dari file .txt"
-            setOnClickListener { openPicker() }
-        }
-        root.addView(info)
-        root.addView(btnAcc)
-        root.addView(btnImp)
+        root.addView(title, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(36) })
+        root.addView(btnAcc, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
         setContentView(root)
     }
 
@@ -192,7 +262,7 @@ class MainActivity : Activity() {
 class FloatService : AccessibilityService() {
     private lateinit var wm: WindowManager
     private lateinit var bp: WindowManager.LayoutParams
-    private var bubble: TextView? = null
+    private var bubble: RingBubble? = null
     private var panel: View? = null
     private var editor: View? = null
     private val h = Handler(Looper.getMainLooper())
@@ -258,8 +328,9 @@ class FloatService : AccessibilityService() {
     }
 
     private fun bubbleBg(active: Boolean) = GradientDrawable().apply {
-        if (active) setColor(cBlue()) else setColor(if (dark()) Color.parseColor("#EE2C2C2E") else Color.parseColor("#F5FFFFFF"))
-        cornerRadius = dp(28).toFloat()
+        shape = GradientDrawable.OVAL
+        if (active) setColor(if (dark()) Color.parseColor("#F01F2F4A") else Color.parseColor("#F5E6F0FF"))
+        else setColor(if (dark()) Color.parseColor("#EE2C2C2E") else Color.parseColor("#F5FFFFFF"))
         setStroke(dp(1), if (dark()) Color.parseColor("#33FFFFFF") else Color.parseColor("#22000000"))
     }
 
@@ -285,6 +356,11 @@ class FloatService : AccessibilityService() {
         }
         layoutParams = mlp(dp(size), dp(size), dp(6), 0, 0, 0)
         setOnClickListener { onClick() }
+    }
+
+    private fun setSel(v: TextView, sel: Boolean) {
+        v.setTextColor(if (sel) Color.WHITE else cPrimary())
+        (v.background as? GradientDrawable)?.setColor(if (sel) cBlue() else cBtnGray())
     }
 
     private fun pill(label: String, bgc: Int, fg: Int, onClick: () -> Unit) = TextView(this).apply {
@@ -337,7 +413,7 @@ class FloatService : AccessibilityService() {
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
     }
 
-    private fun keyOf(t: Tpl): String = t.name + "|" + t.text.hashCode().toString()
+    private fun keyOf(t: Tpl): String = t.name + "|" + t.text.hashCode().toString() + "|" + t.mode.toString()
 
     private fun countLines(s: String): Int = s.split("\n").count { it.isNotBlank() }
 
@@ -349,17 +425,18 @@ class FloatService : AccessibilityService() {
         instance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         bp = lp().apply {
+            width = dp(64)
+            height = dp(64)
             x = dp(8)
             y = dp(160)
         }
 
-        val b = TextView(this).apply {
+        val b = RingBubble(this).apply {
             gravity = Gravity.CENTER
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
-            minWidth = dp(56)
-            minHeight = dp(56)
-            setPadding(dp(14), 0, dp(14), 0)
+            includeFontPadding = false
+            setPadding(dp(4), 0, dp(4), 0)
         }
         b.setOnTouchListener(object : View.OnTouchListener {
             var sx = 0
@@ -490,9 +567,9 @@ class FloatService : AccessibilityService() {
     private fun placePause() {
         val p = pauseLp ?: return
         val sw = resources.displayMetrics.widthPixels
-        val bw = bubble?.width?.takeIf { it > 0 } ?: dp(56)
+        val bw = bubble?.width?.takeIf { it > 0 } ?: dp(64)
         p.x = if (bp.x + bw + dp(50) > sw) bp.x - dp(50) else bp.x + bw + dp(6)
-        p.y = bp.y + dp(6)
+        p.y = bp.y + dp(10)
     }
 
     private fun showPauseBtn() {
@@ -541,23 +618,44 @@ class FloatService : AccessibilityService() {
         pauseLp = null
     }
 
+    private fun setBubbleCount(l: RingBubble) {
+        val total = lines.size
+        val w = total.toString().length
+        l.textSize = when {
+            w <= 3 -> 15f
+            w <= 5 -> 12f
+            w <= 7 -> 10f
+            else -> 8.5f
+        }
+        val top = idx.toString()
+        val bottom = (if (loop) "\u21BB " else "") + "/" + total.toString()
+        val sp = SpannableString(top + "\n" + bottom)
+        sp.setSpan(RelativeSizeSpan(0.72f), top.length + 1, sp.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        l.text = sp
+    }
+
     private fun refreshBubble() {
         val l = bubble ?: return
         if (running) showPauseBtn() else hidePauseBtn()
-        if (running) {
-            l.text = (if (loop) "\u21BB " else "") + idx.toString() + "/" + lines.size.toString()
-            l.post { movePause() }
-            l.setTextColor(Color.WHITE)
-            l.background = bubbleBg(true)
-        } else if (curKey != "" && lines.isNotEmpty()) {
-            l.text = idx.toString() + "/" + lines.size.toString()
-            l.setTextColor(cPrimary())
-            l.background = bubbleBg(false)
+        l.ringColor = cBlue()
+        l.trackColor = if (dark()) Color.parseColor("#44FFFFFF") else Color.parseColor("#26000000")
+        if (curKey != "" && lines.isNotEmpty()) {
+            // outline mengikuti progres: idx / total. Selesai (mis. 999/999) = lingkaran biru penuh.
+            l.progress = idx.toFloat() / lines.size.toFloat()
+            l.showTrack = true
+            setBubbleCount(l)
+            l.setTextColor(if (running) cBlue() else cPrimary())
+            l.background = bubbleBg(running)
+            if (running) l.post { movePause() }
         } else {
+            l.progress = 0f
+            l.showTrack = false
+            l.textSize = 20f
             l.text = "T"
             l.setTextColor(cBlue())
             l.background = bubbleBg(false)
         }
+        l.invalidate()
     }
 
     private fun toggle() {
@@ -667,7 +765,7 @@ class FloatService : AccessibilityService() {
             }
             items.forEachIndexed { i, t ->
                 val key = keyOf(t)
-                val total = countLines(t.text)
+                val total = expand(t.text, t.mode).size
                 val done = pos[key] ?: 0
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -680,20 +778,34 @@ class FloatService : AccessibilityService() {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 })
-                val sub = if (done in 1 until total) done.toString() + "/" + total.toString() + " baris, lanjut" else total.toString() + " baris"
+                val tag = (if (t.mode == 1) "Angka" else "Standar") + (if (t.loop) " \u00B7 ulang" else "")
+                val sub = tag + " \u00B7 " + (if (done in 1 until total) done.toString() + "/" + total.toString() + ", lanjut" else total.toString() + " baris")
                 col.addView(txt(sub, 12f, cGray(), false))
                 row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
                 row.addView(circleBtn("\u270E", cBtnGray(), 36) {
                     closePanel()
                     showEditor(i)
                 })
-                row.addView(circleBtn("\u21BB", cBlue(), 36) {
-                    closePanel()
-                    play(t, true)
-                })
-                row.addView(circleBtn("\u25B6", cGreen(), 40) {
-                    closePanel()
-                    play(t)
+                if (done > 0) {
+                    row.addView(circleBtn("\u21BA", cBtnGray(), 36) {
+                        if (running && curKey == key) pause()
+                        pos[key] = 0
+                        if (curKey == key) {
+                            idx = 0
+                            refreshBubble()
+                        }
+                        openPanel("list")
+                    })
+                }
+                val isRun = running && curKey == key
+                row.addView(circleBtn(if (isRun) "\u23F8" else "\u25B6", if (isRun) cRed() else cGreen(), 40) {
+                    if (isRun) {
+                        pause()
+                        openPanel("list")
+                    } else {
+                        closePanel()
+                        play(t)
+                    }
                 })
                 box.addView(row, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
             }
@@ -744,10 +856,39 @@ class FloatService : AccessibilityService() {
         box.addView(txt(if (cur == null) "Template baru" else "Edit template", 20f, cPrimary(), true))
         val etName = field("Nama", false)
         etName.setText(cur?.name ?: "")
-        val etText = field("Isi (satu baris = satu ketikan; {000} = hitung otomatis 000-999)", true)
+        val etText = field("Isi (satu baris = satu ketikan; {000} = hitung otomatis, maks 9 digit)", true)
         etText.setText(cur?.text ?: "")
         box.addView(etName, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
         box.addView(etText, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+
+        var selMode = cur?.mode ?: 0
+        var selLoop = cur?.loop ?: false
+        val pStd = pill("Standar", cBtnGray(), cPrimary()) {}
+        val pNum = pill("Angka", cBtnGray(), cPrimary()) {}
+        val pOnce = pill("Sekali", cBtnGray(), cPrimary()) {}
+        val pLoop = pill("Ulang \u21BB", cBtnGray(), cPrimary()) {}
+        fun refreshSel() {
+            setSel(pStd, selMode == 0)
+            setSel(pNum, selMode == 1)
+            setSel(pOnce, !selLoop)
+            setSel(pLoop, selLoop)
+            etText.hint = if (selMode == 1) "Pola angka satu baris, contoh: pesan{000} (000-999)" else "Isi (satu baris = satu ketikan)"
+        }
+        pStd.setOnClickListener { selMode = 0; refreshSel() }
+        pNum.setOnClickListener { selMode = 1; refreshSel() }
+        pOnce.setOnClickListener { selLoop = false; refreshSel() }
+        pLoop.setOnClickListener { selLoop = true; refreshSel() }
+        refreshSel()
+        val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        modeRow.addView(pStd)
+        modeRow.addView(pNum)
+        val loopRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        loopRow.addView(pOnce)
+        loopRow.addView(pLoop)
+        box.addView(txt("Mode", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(10), 0, 0))
+        box.addView(modeRow, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
+        box.addView(txt("Putaran", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(8), 0, 0))
+        box.addView(loopRow, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
 
         val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btns.addView(pill("Batal", cBtnGray(), cPrimary()) {
@@ -773,13 +914,17 @@ class FloatService : AccessibilityService() {
                 toast("Isi template masih kosong")
                 return@pill
             }
+            if (selMode == 1 && (tx.contains("\n") || !Regex("\\{\\d{1,9}\\}").containsMatchIn(tx))) {
+                toast("Mode Angka: tulis satu baris berpola, contoh pesan{000}")
+                return@pill
+            }
             val all = Store.load(this)
             val name = if (nm.isEmpty()) "Template " + (all.size + 1).toString() else nm
             if (cur != null && index >= 0 && index < all.size) {
                 pos.remove(keyOf(all[index]))
-                all[index] = Tpl(name, tx)
+                all[index] = Tpl(name, tx, selMode, selLoop)
             } else {
-                all.add(Tpl(name, tx))
+                all.add(Tpl(name, tx, selMode, selLoop))
             }
             Store.save(this, all)
             closeEditor()
@@ -890,26 +1035,32 @@ class FloatService : AccessibilityService() {
     }
 
     // Template satu baris berisi {000} diubah jadi deretan: 000, 001, ... 999.
-    // Angka di dalam {} = angka awal, jumlah digit = lebar angka (maksimal 5 digit).
-    private fun expand(text: String): List<String> {
+    // Angka di dalam {} = angka awal, jumlah digit = lebar angka (maksimal 9 digit).
+    // Daftar dibuat malas: angka dihitung saat dibutuhkan, jadi 9 digit pun tidak memenuhi memori.
+    private fun expand(text: String, mode: Int): List<String> {
         val t = text.trim()
-        val m = Regex("\\{(\\d{1,5})\\}").find(t)
-        if (m != null && !t.contains("\n")) {
-            val w = m.groupValues[1].length
-            var max = 1
-            repeat(w) { max *= 10 }
-            val start = m.groupValues[1].toInt()
-            val out = ArrayList<String>()
-            for (n in start until max) {
-                out.add(t.replaceRange(m.range, n.toString().padStart(w, '0')))
+        val m = Regex("\\{(\\d{1,9})\\}").find(t)
+        if (mode == 1 && m != null && !t.contains("\n")) {
+            val digits = m.groupValues[1]
+            val w = digits.length
+            var max = 1L
+            repeat(w) { max *= 10L }
+            val start = digits.toLong()
+            val pre = t.substring(0, m.range.first)
+            val suf = t.substring(m.range.last + 1)
+            val count = (max - start).toInt()
+            return object : AbstractList<String>() {
+                override val size: Int get() = count
+                override fun get(index: Int): String =
+                    pre + (start + index).toString().padStart(w, '0') + suf
             }
-            return out
         }
         return t.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
     }
 
-    private fun play(t: Tpl, repeat: Boolean = false) {
-        val ls = expand(t.text)
+    private fun play(t: Tpl) {
+        val repeat = t.loop
+        val ls = expand(t.text, t.mode)
         if (ls.isEmpty()) return
         if ((ls.size > 1 || repeat) && Build.VERSION.SDK_INT < 30 && Store.enterMode(this) == 0) {
             toast("Enter otomatis butuh Android 11+")
