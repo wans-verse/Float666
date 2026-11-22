@@ -151,6 +151,16 @@ object Store {
         c.getSharedPreferences("tpl", 0).edit().putInt("bx", x).putInt("by", y).apply()
     }
 
+    // Jeda per ketikan dalam milidetik (0 = Turbo). Kalau belum pernah diatur, ikut nilai slider lama.
+    fun delayMs(c: Context): Int {
+        val sp = c.getSharedPreferences("tpl", 0)
+        return if (sp.contains("ms")) sp.getInt("ms", 700) else sp.getInt("speed", 35) * 20
+    }
+
+    fun setDelayMs(c: Context, v: Int) {
+        c.getSharedPreferences("tpl", 0).edit().putInt("ms", v.coerceIn(0, 5000)).apply()
+    }
+
     fun speed(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("speed", 35)
 
     fun setSpeed(c: Context, v: Int) {
@@ -608,7 +618,7 @@ class FloatService : AccessibilityService() {
         override fun run() {
             if (!running) return
             val gap = SystemClock.uptimeMillis() - lastStepAt
-            val limit = maxOf(3000L, Store.speed(this@FloatService) * 20L * 4L)
+            val limit = maxOf(3000L, Store.delayMs(this@FloatService) * 4L)
             if (gap > limit) {
                 pause()
                 toast("Pengetikan terhenti. Ketuk bubble lalu play untuk lanjut")
@@ -790,6 +800,9 @@ class FloatService : AccessibilityService() {
     private fun keyOf(t: Tpl): String = t.name + "|" + t.text.hashCode().toString() + "|" + t.mode.toString()
 
     private fun countLines(s: String): Int = s.split("\n").count { it.isNotBlank() }
+
+    private fun msLabel(ms: Int): String =
+        if (ms == 0) "Turbo (tanpa jeda, secepat mungkin)" else ms.toString() + " ms per ketikan"
 
     private fun speedLabel(v: Int): String =
         if (v == 0) "Turbo (tanpa jeda, secepat mungkin)" else (v * 20).toString() + " ms per baris"
@@ -1033,19 +1046,20 @@ class FloatService : AccessibilityService() {
 
         if (mode == "set") {
             box.addView(txt("Kecepatan mengetik", 20f, cPrimary(), true))
-            val lbl = txt(speedLabel(Store.speed(this)), 14f, cBlue(), true).apply {
+            val lbl = txt(msLabel(Store.delayMs(this)), 14f, cBlue(), true).apply {
                 setPadding(0, dp(10), 0, dp(4))
             }
             box.addView(lbl)
             val sb = SeekBar(this).apply {
                 max = 100
-                progress = Store.speed(this@FloatService)
+                progress = minOf(100, Store.delayMs(this@FloatService) / 20)
                 progressTintList = ColorStateList.valueOf(cBlue())
                 thumbTintList = ColorStateList.valueOf(cBlue())
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) {
-                        lbl.text = speedLabel(p)
-                        Store.setSpeed(this@FloatService, p)
+                        if (!u) return
+                        lbl.text = msLabel(p * 20)
+                        Store.setDelayMs(this@FloatService, p * 20)
                     }
 
                     override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -1054,6 +1068,12 @@ class FloatService : AccessibilityService() {
             }
             box.addView(sb, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
             box.addView(txt("Kiri = Turbo, kanan = lambat. Kalau ada pesan terlewat, geser sedikit ke kanan.", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(4), 0, 0))
+            val manual = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            manual.addView(pill("Isi milidetik manual", cBtnGray(), cPrimary()) {
+                closePanel()
+                showDelayEditor()
+            })
+            box.addView(manual, mlp(MATCH, WRAP, 0, dp(10), 0, 0))
             box.addView(txt("Cara Enter", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
             val em = Store.enterMode(this)
             val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -1438,6 +1458,77 @@ class FloatService : AccessibilityService() {
         editor = box
     }
 
+    // Isi jeda per ketikan secara manual (ms). 0 = Turbo.
+    private fun showDelayEditor() {
+        closeEditor()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = glass(dp(28).toFloat())
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        box.addView(txt("Jeda per ketikan", 20f, cPrimary(), true))
+        box.addView(txt("Dalam milidetik (ms), 0 sampai 5000. Isi 0 untuk Turbo.", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(2), 0, 0))
+        val et = field("Milidetik", false).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(Store.delayMs(this@FloatService).toString())
+            setSelection(text.length)
+        }
+        box.addView(et, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
+        val preview = txt("", 13f, cBlue(), true)
+        box.addView(preview, mlp(WRAP, WRAP, 0, dp(8), 0, 0))
+        fun v(): Int = (et.text.toString().toLongOrNull() ?: 0L).coerceIn(0L, 5000L).toInt()
+        fun upd() {
+            val x = v()
+            preview.text = if (x == 0) "Turbo: secepat yang bisa diterima aplikasi" else "Sekitar " + (1000 / x) + " ketikan per detik"
+        }
+        et.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) { upd() }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        upd()
+
+        fun chips(vararg items: Int): LinearLayout {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (x in items) {
+                row.addView(pill(if (x == 0) "Turbo" else x.toString(), cBtnGray(), cPrimary()) {
+                    et.setText(x.toString())
+                    et.setSelection(et.text.length)
+                })
+            }
+            return row
+        }
+        box.addView(chips(0, 5, 10), mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+        box.addView(chips(20, 50, 100), mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+
+        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btns.addView(pill("Batal", cBtnGray(), cPrimary()) {
+            closeEditor()
+            openPanel("set")
+        })
+        btns.addView(pill("Simpan", cBlue(), Color.WHITE) {
+            Store.setDelayMs(this, v())
+            closeEditor()
+            openPanel("set")
+        })
+        box.addView(btns, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
+
+        val sw = resources.displayMetrics.widthPixels
+        val ep = WindowManager.LayoutParams(
+            minOf(dp(320), sw - dp(24)),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            0,
+            PixelFormat.TRANSLUCENT
+        )
+        ep.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        ep.y = dp(60)
+        ep.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+        blur(ep)
+        wm.addView(box, ep)
+        editor = box
+    }
+
     private fun importFile() {
         closePanel()
         val i = Intent(this, MainActivity::class.java)
@@ -1633,7 +1724,7 @@ class FloatService : AccessibilityService() {
     }
 
     private fun stepInner() {
-        val ms = Store.speed(this) * 20
+        val ms = Store.delayMs(this)
         val turbo = ms == 0
         val text = lines[idx]
 
