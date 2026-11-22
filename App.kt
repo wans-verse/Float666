@@ -1,7 +1,11 @@
 package com.wans.tpl
 
 import android.accessibilityservice.AccessibilityService
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.app.Activity
+import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -21,17 +25,24 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.service.quicksettings.Tile
+import android.service.quicksettings.TileService
 import android.provider.Settings
 import android.text.SpannableString
 import android.text.Spanned
+import android.text.Editable
+import android.text.InputType
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.text.style.RelativeSizeSpan
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -72,6 +83,43 @@ object Store {
         return out
     }
 
+    // Cadangan: format JSON sama dengan penyimpanan internal
+    fun exportJson(c: Context): String {
+        val a = JSONArray()
+        load(c).forEach {
+            val o = JSONObject()
+            o.put("n", it.name)
+            o.put("c", it.text)
+            o.put("m", it.mode)
+            o.put("l", it.loop)
+            a.put(o)
+        }
+        return a.toString(2)
+    }
+
+    // Mengembalikan jumlah template baru yang ditambahkan, atau -1 kalau bukan file cadangan.
+    // Template dengan nama dan isi yang sama dilewati.
+    fun importJson(c: Context, txt: String): Int {
+        if (!txt.startsWith("[")) return -1
+        try {
+            val a = JSONArray(txt)
+            val all = load(c)
+            var added = 0
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                val n = o.getString("n")
+                val body = o.getString("c")
+                if (all.any { it.name == n && it.text == body }) continue
+                all.add(Tpl(n, body, o.optInt("m", 0), o.optBoolean("l", false)))
+                added++
+            }
+            save(c, all)
+            return added
+        } catch (e: Exception) {
+            return -1
+        }
+    }
+
     fun save(c: Context, l: List<Tpl>) {
         val a = JSONArray()
         l.forEach {
@@ -83,6 +131,15 @@ object Store {
             a.put(o)
         }
         c.getSharedPreferences("tpl", 0).edit().putString("data", a.toString()).apply()
+    }
+
+    // posisi bubble terakhir (-1 = belum pernah disimpan)
+    fun bubbleX(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("bx", -1)
+
+    fun bubbleY(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("by", -1)
+
+    fun setBubblePos(c: Context, x: Int, y: Int) {
+        c.getSharedPreferences("tpl", 0).edit().putInt("bx", x).putInt("by", y).apply()
     }
 
     fun speed(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("speed", 35)
@@ -121,13 +178,26 @@ class RingBubble(c: Context) : TextView(c) {
     var trackColor = Color.parseColor("#33808080")
     private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val r = RectF()
+    private var pulse = 0f
+
+    // Cincin menebal sebentar dua kali = tanda selesai
+    fun pulseRing() {
+        ValueAnimator.ofFloat(0f, 1f, 0f, 1f, 0f).apply {
+            duration = 700
+            addUpdateListener {
+                pulse = it.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (!showTrack) return
         val d = resources.displayMetrics.density
-        val sw = 3.5f * d
-        val m = sw / 2f + 1f * d
+        val sw = (3.5f + 2.5f * pulse) * d
+        val m = 3f * d + 1f * d
         r.set(m, m, width - m, height - m)
         p.strokeWidth = sw
         p.color = trackColor
@@ -144,12 +214,18 @@ class RingBubble(c: Context) : TextView(c) {
 // ===== Halaman apk (aktivasi + pemilih file) =====
 class MainActivity : Activity() {
     private var pickMode = false
+    private var exportMode = false
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         pickMode = intent.getBooleanExtra("pick", false)
+        exportMode = intent.getBooleanExtra("export", false)
         if (pickMode) {
             openPicker()
+            return
+        }
+        if (exportMode) {
+            openExport()
             return
         }
         val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
@@ -207,14 +283,34 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (!pickMode) FloatService.instance?.showBubble()
+        if (!pickMode && !exportMode) FloatService.instance?.showBubble()
     }
 
     private fun openPicker() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
         i.addCategory(Intent.CATEGORY_OPENABLE)
-        i.type = "text/*"
+        i.type = "*/*"
+        i.putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/*", "application/json"))
         startActivityForResult(i, 1)
+    }
+
+    private fun openExport() {
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+        i.addCategory(Intent.CATEGORY_OPENABLE)
+        i.type = "application/json"
+        i.putExtra(Intent.EXTRA_TITLE, "WansForce-cadangan.json")
+        startActivityForResult(i, 2)
+    }
+
+    private fun exportUri(uri: Uri) {
+        try {
+            val txt = Store.exportJson(this)
+            contentResolver.openOutputStream(uri)?.use { it.write(txt.toByteArray(Charsets.UTF_8)) }
+            val n = Store.load(this).size
+            Toast.makeText(this, "Cadangan disimpan (" + n + " template)", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Gagal menyimpan cadangan", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun fileName(uri: Uri): String {
@@ -237,6 +333,11 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "File kosong", Toast.LENGTH_SHORT).show()
                 return
             }
+            val restored = Store.importJson(this, clean)
+            if (restored >= 0) {
+                Toast.makeText(this, "Cadangan dipulihkan (" + restored + " template baru)", Toast.LENGTH_LONG).show()
+                return
+            }
             val name = fileName(uri)
             val all = Store.load(this)
             all.add(Tpl(name, clean))
@@ -254,7 +355,43 @@ class MainActivity : Activity() {
             val uri = data?.data
             if (uri != null) importUri(uri)
         }
-        if (pickMode) finish()
+        if (req == 2 && res == RESULT_OK) {
+            val uri = data?.data
+            if (uri != null) exportUri(uri)
+        }
+        if (pickMode || exportMode) finish()
+    }
+}
+
+// ===== Tile panel cepat: munculkan / sembunyikan bubble =====
+class BubbleTile : TileService() {
+    override fun onStartListening() {
+        update()
+    }
+
+    override fun onClick() {
+        val s = FloatService.instance
+        if (s == null) {
+            // layanan aksesibilitas belum aktif: buka apk
+            val i = Intent(this, MainActivity::class.java)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (Build.VERSION.SDK_INT >= 34) {
+                startActivityAndCollapse(PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_IMMUTABLE))
+            } else {
+                @Suppress("DEPRECATION")
+                startActivityAndCollapse(i)
+            }
+            return
+        }
+        s.toggleBubble()
+        update()
+    }
+
+    private fun update() {
+        val t = qsTile ?: return
+        val s = FloatService.instance
+        t.state = if (s != null && !s.isBubbleHidden()) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        t.updateTile()
     }
 }
 
@@ -427,8 +564,8 @@ class FloatService : AccessibilityService() {
         bp = lp().apply {
             width = dp(64)
             height = dp(64)
-            x = dp(8)
-            y = dp(160)
+            x = if (Store.bubbleX(this@FloatService) >= 0) Store.bubbleX(this@FloatService) else dp(8)
+            y = if (Store.bubbleY(this@FloatService) >= 0) Store.bubbleY(this@FloatService) else dp(160)
         }
 
         val b = RingBubble(this).apply {
@@ -475,6 +612,8 @@ class FloatService : AccessibilityService() {
                             hideBubble()
                         } else if (!moved) {
                             toggle()
+                        } else {
+                            snapBubble(v)
                         }
                     }
                     MotionEvent.ACTION_CANCEL -> hideCloseTarget()
@@ -485,6 +624,41 @@ class FloatService : AccessibilityService() {
         wm.addView(b, bp)
         bubble = b
         refreshBubble()
+    }
+
+    // ----- menempel ke tepi layar + simpan posisi -----
+    private fun snapBubble(v: View) {
+        val dm = resources.displayMetrics
+        val w = dp(64)
+        val tx = if (bp.x + w / 2 < dm.widthPixels / 2) dp(8) else dm.widthPixels - w - dp(8)
+        bp.y = bp.y.coerceIn(dp(24), dm.heightPixels - w - dp(48))
+        val from = bp.x
+        ValueAnimator.ofInt(from, tx).apply {
+            duration = 220
+            interpolator = DecelerateInterpolator()
+            addUpdateListener {
+                bp.x = it.animatedValue as Int
+                try {
+                    wm.updateViewLayout(v, bp)
+                } catch (e: Exception) {
+                }
+                movePause()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(a: Animator) {
+                    Store.setBubblePos(this@FloatService, bp.x, bp.y)
+                }
+            })
+            start()
+        }
+    }
+
+    // ----- tanda selesai: cincin berdenyut + getar halus -----
+    private fun celebrate() {
+        val b = bubble ?: return
+        b.pulseRing()
+        val type = if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS
+        b.performHapticFeedback(type)
     }
 
     // ----- tutup bubble: tarik ke bawah tengah layar -----
@@ -544,14 +718,20 @@ class FloatService : AccessibilityService() {
             }
         }
         hidden = true
-        toast("Bubble ditutup. Buka apk untuk memunculkan lagi.")
+        toast("Bubble ditutup. Munculkan lagi lewat tile WansForce di panel cepat atau buka apk.")
+    }
+
+    fun isBubbleHidden(): Boolean = hidden
+
+    fun toggleBubble() {
+        if (hidden) showBubble() else hideBubble()
     }
 
     fun showBubble() {
         if (!hidden) return
         val b = bubble ?: return
-        bp.x = dp(8)
-        bp.y = dp(160)
+        bp.x = if (Store.bubbleX(this) >= 0) Store.bubbleX(this) else dp(8)
+        bp.y = if (Store.bubbleY(this) >= 0) Store.bubbleY(this) else dp(160)
         try {
             wm.addView(b, bp)
         } catch (e: Exception) {
@@ -722,6 +902,15 @@ class FloatService : AccessibilityService() {
                 txt("Langsung = tanpa clipboard, jadi tidak ada popup 'disalin/ditempel' dan lebih ringan. Kalau teks tidak masuk di aplikasimu, kembali ke Clipboard.", 12f, cGray(), false),
                 mlp(WRAP, WRAP, 0, dp(4), 0, 0)
             )
+            box.addView(txt("Cadangan template", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
+            val bk = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            bk.addView(pill("Ekspor", cBtnGray(), cPrimary()) { exportFile() })
+            bk.addView(pill("Pulihkan", cBtnGray(), cPrimary()) { importFile() })
+            box.addView(bk, mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+            box.addView(
+                txt("Ekspor menyimpan semua template ke satu file .json. Pulihkan membaca file itu lagi, template yang sama dilewati.", 12f, cGray(), false),
+                mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+            )
             val done = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             done.addView(pill("Selesai", cBlue(), Color.WHITE) { openPanel("list") })
             box.addView(done, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
@@ -781,6 +970,11 @@ class FloatService : AccessibilityService() {
                 val tag = (if (t.mode == 1) "Angka" else "Standar") + (if (t.loop) " \u00B7 ulang" else "")
                 val sub = tag + " \u00B7 " + (if (done in 1 until total) done.toString() + "/" + total.toString() + ", lanjut" else total.toString() + " baris")
                 col.addView(txt(sub, 12f, cGray(), false))
+                col.setOnLongClickListener {
+                    closePanel()
+                    showJump(t, key, total)
+                    true
+                }
                 row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
                 row.addView(circleBtn("\u270E", cBtnGray(), 36) {
                     closePanel()
@@ -808,6 +1002,9 @@ class FloatService : AccessibilityService() {
                     }
                 })
                 box.addView(row, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+            }
+            if (items.isNotEmpty()) {
+                box.addView(txt("Tahan nama template untuk lompat ke ketikan tertentu", 11f, cGray(), false), mlp(WRAP, WRAP, 0, dp(10), 0, 0))
             }
         }
 
@@ -956,6 +1153,81 @@ class FloatService : AccessibilityService() {
             }
         }
         editor = null
+    }
+
+    private fun exportFile() {
+        closePanel()
+        val i = Intent(this, MainActivity::class.java)
+        i.putExtra("export", true)
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(i)
+    }
+
+    // Lompat ke ketikan ke-N (mulai dari 1) tanpa mengubah template
+    private fun showJump(t: Tpl, key: String, total: Int) {
+        closeEditor()
+        val cur = (pos[key] ?: 0).coerceIn(0, maxOf(total - 1, 0))
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = glass(dp(28).toFloat())
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        box.addView(txt("Lompat ke ketikan", 20f, cPrimary(), true))
+        box.addView(txt(t.name + " \u00B7 1 sampai " + total, 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(2), 0, 0))
+        val et = field("Nomor ketikan", false).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText((cur + 1).toString())
+            setSelection(text.length)
+        }
+        box.addView(et, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
+        val preview = txt("", 13f, cBlue(), true)
+        box.addView(preview, mlp(WRAP, WRAP, 0, dp(8), 0, 0))
+        val src = expand(t.text, t.mode)
+        fun n(): Int = (et.text.toString().toLongOrNull() ?: 1L).coerceIn(1L, maxOf(total, 1).toLong()).toInt()
+        fun upd() {
+            val k = n()
+            preview.text = if (src.isNotEmpty()) "Mulai dari: " + src[k - 1] else ""
+            preview.maxLines = 1
+            preview.ellipsize = TextUtils.TruncateAt.END
+        }
+        et.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) { upd() }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        upd()
+        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btns.addView(pill("Batal", cBtnGray(), cPrimary()) {
+            closeEditor()
+            openPanel("list")
+        })
+        btns.addView(pill("Lompat", cBlue(), Color.WHITE) {
+            val k = n() - 1
+            if (running && curKey == key) pause()
+            pos[key] = k
+            if (curKey == key) {
+                idx = k
+                refreshBubble()
+            }
+            closeEditor()
+            openPanel("list")
+        })
+        box.addView(btns, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
+
+        val sw = resources.displayMetrics.widthPixels
+        val ep = WindowManager.LayoutParams(
+            minOf(dp(320), sw - dp(24)),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            0,
+            PixelFormat.TRANSLUCENT
+        )
+        ep.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        ep.y = dp(60)
+        ep.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+        blur(ep)
+        wm.addView(box, ep)
+        editor = box
     }
 
     private fun importFile() {
@@ -1119,7 +1391,16 @@ class FloatService : AccessibilityService() {
                 idx = 0
                 pos[curKey] = 0
             } else {
-                finish()
+                // item terakhir tetap di-Enter dulu, baru selesai
+                refreshBubble()
+                val last = Store.speed(this) * 20 * 3 / 10
+                h.postDelayed({
+                    pressEnter()
+                    h.postDelayed({
+                        finish()
+                        celebrate()
+                    }, 150)
+                }, maxOf(last, 20).toLong())
                 return
             }
         }
