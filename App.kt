@@ -5,11 +5,14 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.Activity
+import android.app.KeyguardManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Canvas
@@ -568,6 +571,35 @@ class FloatService : AccessibilityService() {
     private var panelMode = ""
     private var panelInfo: TextView? = null
     private var turboNode: AccessibilityNodeInfo? = null
+    private var locked = false
+    private var lastBubbleDown = 0L
+
+    // Layar mati / terkunci: semua tampilan melayang disembunyikan dan pengetikan dijeda
+    private val lockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            when (i?.action) {
+                Intent.ACTION_SCREEN_OFF -> lockOverlay(true)
+                Intent.ACTION_USER_PRESENT -> lockOverlay(false)
+                Intent.ACTION_SCREEN_ON -> {
+                    val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                    if (!km.isKeyguardLocked) lockOverlay(false)
+                }
+            }
+        }
+    }
+
+    private fun lockOverlay(on: Boolean) {
+        locked = on
+        if (on) {
+            closePanel()
+            closeEditor()
+            hideCloseTarget()
+            pause()
+            bubble?.visibility = View.GONE
+        } else if (!hidden) {
+            bubble?.visibility = View.VISIBLE
+        }
+    }
     private var turboCount = 0
     private var lastUi = 0L
 
@@ -794,6 +826,7 @@ class FloatService : AccessibilityService() {
                         tx = ev.rawX
                         ty = ev.rawY
                         moved = false
+                        lastBubbleDown = SystemClock.uptimeMillis()
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val dx = (ev.rawX - tx).toInt()
@@ -828,6 +861,18 @@ class FloatService : AccessibilityService() {
         wm.addView(b, bp)
         bubble = b
         refreshBubble()
+
+        val f = IntentFilter()
+        f.addAction(Intent.ACTION_SCREEN_OFF)
+        f.addAction(Intent.ACTION_SCREEN_ON)
+        f.addAction(Intent.ACTION_USER_PRESENT)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(lockReceiver, f, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(lockReceiver, f)
+        }
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (km.isKeyguardLocked) lockOverlay(true)
     }
 
     // ----- menempel ke tepi layar + simpan posisi -----
@@ -924,6 +969,7 @@ class FloatService : AccessibilityService() {
         val b = bubble ?: return
         bp.x = if (Store.bubbleX(this) >= 0) Store.bubbleX(this) else dp(8)
         bp.y = if (Store.bubbleY(this) >= 0) Store.bubbleY(this) else dp(160)
+        b.visibility = if (locked) View.GONE else View.VISIBLE
         try {
             wm.addView(b, bp)
         } catch (e: Exception) {
@@ -1139,7 +1185,15 @@ class FloatService : AccessibilityService() {
             }
         }
 
-        val sv = MaxScroll(this, dp(380))
+        // Panel ditaruh di bawah bubble kalau muat, kalau tidak di atasnya, jadi bubble tidak pernah tertutup
+        val dm = resources.displayMetrics
+        val below = dm.heightPixels - (bp.y + dp(64)) - dp(16)
+        val above = bp.y - dp(32)
+        val placeBelow = below >= dp(408) || below >= above
+        val avail = if (placeBelow) below else above
+        val maxH = (avail - dp(28)).coerceIn(dp(120), dp(380))
+
+        val sv = MaxScroll(this, maxH)
         sv.addView(box)
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1148,12 +1202,27 @@ class FloatService : AccessibilityService() {
         }
         wrap.addView(sv)
 
-        val sw = resources.displayMetrics.widthPixels
+        val sw = dm.widthPixels
         val pw = minOf(dp(300), sw - dp(16))
+        wrap.measure(
+            View.MeasureSpec.makeMeasureSpec(pw, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val ph = wrap.measuredHeight
         val pp = lp().apply {
             width = pw
             x = maxOf(0, minOf(bp.x, sw - pw - dp(8)))
-            y = bp.y + dp(64)
+            y = if (placeBelow) bp.y + dp(64) + dp(8) else maxOf(dp(24), bp.y - ph - dp(8))
+            flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+        }
+        // ketuk di luar panel = tutup panel (kecuali yang diketuk adalah bubble, itu sudah ditangani bubble)
+        wrap.setOnTouchListener { v, ev ->
+            if (ev.action == MotionEvent.ACTION_OUTSIDE) {
+                v.postDelayed({
+                    if (panel === v && SystemClock.uptimeMillis() - lastBubbleDown > 350) closePanel()
+                }, 120)
+            }
+            false
         }
         blur(pp)
         wm.addView(wrap, pp)
@@ -1650,6 +1719,10 @@ class FloatService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(lockReceiver)
+        } catch (e: Exception) {
+        }
         h.removeCallbacksAndMessages(null)
         if (instance === this) instance = null
         hideCloseTarget()
