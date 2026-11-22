@@ -24,6 +24,8 @@ jobs:
           mkdir -p app/src/main/java/com/wans/tpl
           mkdir -p app/src/main/res/xml
           mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
           cp App.kt app/src/main/java/com/wans/tpl/App.kt
 
           cat > settings.gradle <<'EOF'
@@ -40,7 +42,7 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = "TemplateMelayang"
+          rootProject.name = "WansForce"
           include ':app'
           EOF
 
@@ -79,10 +81,45 @@ jobs:
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="app_name">Template Melayang</string>
+              <string name="app_name">WansForce</string>
               <string name="acc_desc">Mengetik template otomatis di kolom yang sedang aktif</string>
           </resources>
           EOF
+
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_bg">#FFFFFF</color>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:pathData="M29,36 L41.5,72 L54,46 L66.5,72 L79,36"
+                  android:strokeColor="#000000"
+                  android:strokeWidth="9"
+                  android:strokeLineCap="round"
+                  android:strokeLineJoin="round"
+                  android:fillColor="#00000000" />
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_bg" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+              <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF
+
+          cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
           cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -100,6 +137,8 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <application
                   android:label="@string/app_name"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
                   android:allowBackup="true">
                   <activity
                       android:name="com.wans.tpl.MainActivity"
@@ -113,6 +152,7 @@ jobs:
                       android:name="com.wans.tpl.FloatService"
                       android:exported="true"
                       android:label="@string/app_name"
+                      android:icon="@mipmap/ic_launcher"
                       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
                       <intent-filter>
                           <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -130,5 +170,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TemplateMelayang-apk
+          name: WansForce-apk
           path: app/build/outputs/apk/debug/app-debug.apk
