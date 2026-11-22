@@ -1,6 +1,7 @@
 package com.wans.tpl
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
@@ -23,6 +24,7 @@ import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -47,12 +49,14 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
@@ -179,6 +183,49 @@ object Store {
 
     fun setEnterMode(c: Context, v: Int) {
         c.getSharedPreferences("tpl", 0).edit().putInt("enter", v).apply()
+    }
+
+    // Ukuran bubble (dp) dan transparansi (persen)
+    fun bubbleSize(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("bsz", 64).coerceIn(48, 88)
+
+    fun setBubbleSize(c: Context, v: Int) {
+        c.getSharedPreferences("tpl", 0).edit().putInt("bsz", v.coerceIn(48, 88)).apply()
+    }
+
+    fun bubbleAlpha(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("bal", 100).coerceIn(40, 100)
+
+    fun setBubbleAlpha(c: Context, v: Int) {
+        c.getSharedPreferences("tpl", 0).edit().putInt("bal", v.coerceIn(40, 100)).apply()
+    }
+
+    // Getar dan bunyi saat selesai
+    fun vibrate(c: Context): Boolean = c.getSharedPreferences("tpl", 0).getBoolean("vib", true)
+
+    fun setVibrate(c: Context, v: Boolean) {
+        c.getSharedPreferences("tpl", 0).edit().putBoolean("vib", v).apply()
+    }
+
+    fun sound(c: Context): Boolean = c.getSharedPreferences("tpl", 0).getBoolean("snd", false)
+
+    fun setSound(c: Context, v: Boolean) {
+        c.getSharedPreferences("tpl", 0).edit().putBoolean("snd", v).apply()
+    }
+
+    // Jeda otomatis kalau keyboard tertutup
+    fun pauseNoKeyboard(c: Context): Boolean = c.getSharedPreferences("tpl", 0).getBoolean("kbp", false)
+
+    fun setPauseNoKeyboard(c: Context, v: Boolean) {
+        c.getSharedPreferences("tpl", 0).edit().putBoolean("kbp", v).apply()
+    }
+
+    // Daftar aplikasi yang diizinkan (nama paket). Kosong = semua aplikasi diizinkan.
+    fun allowedApps(c: Context): MutableSet<String> {
+        val s = c.getSharedPreferences("tpl", 0).getString("apps", "") ?: ""
+        return s.split("\n").filter { it.isNotBlank() }.toMutableSet()
+    }
+
+    fun setAllowedApps(c: Context, v: Set<String>) {
+        c.getSharedPreferences("tpl", 0).edit().putString("apps", v.joinToString("\n")).apply()
     }
 }
 
@@ -371,10 +418,8 @@ class MainActivity : Activity() {
             openExport()
             return
         }
-        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-        val d = resources.displayMetrics.density
-        fun dp(n: Int) = (n * d + 0.5f).toInt()
-        val blue = Color.parseColor(if (night) "#0A84FF" else "#007AFF")
+        night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        dens = resources.displayMetrics.density
 
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
@@ -382,24 +427,74 @@ class MainActivity : Activity() {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
         }
 
-        val root = LinearLayout(this).apply {
+        val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(32), dp(48), dp(32), dp(48))
+            setPadding(dp(20), dp(48), dp(20), dp(40))
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 if (night) intArrayOf(Color.parseColor("#000000"), Color.parseColor("#1C1C1E"))
                 else intArrayOf(Color.parseColor("#F2F2F7"), Color.parseColor("#E5E5EA"))
             )
+            addView(page)
         }
-        val title = TextView(this).apply {
-            text = "WansForce"
-            textSize = 36f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setTextColor(if (night) Color.WHITE else Color.parseColor("#1C1C1E"))
+        val mp = LinearLayout.LayoutParams.MATCH_PARENT
+        val wc = LinearLayout.LayoutParams.WRAP_CONTENT
+
+        // ----- judul + status layanan -----
+        page.addView(label("WansForce", 36f, cText(), true).apply { gravity = Gravity.CENTER }, mlp(mp, wc, 0))
+        val st = label("", 15f, cSub(), true).apply { gravity = Gravity.CENTER }
+        statusView = st
+        page.addView(st, mlp(mp, wc, dp(6)))
+
+        // ----- pengaturan (di atas tombol aksesibilitas) -----
+        val set = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = cardBg()
+            setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        val btnAcc = TextView(this).apply {
+        set.addView(label("Pengaturan", 20f, cText(), true))
+        set.addView(
+            seekRow("Ukuran bubble", 48, 88, Store.bubbleSize(this), { it.toString() + " dp" }) {
+                Store.setBubbleSize(this, it)
+                FloatService.instance?.applyBubbleStyle()
+            },
+            mlp(mp, wc, dp(14))
+        )
+        set.addView(
+            seekRow("Transparansi bubble", 40, 100, Store.bubbleAlpha(this), { it.toString() + "%" }) {
+                Store.setBubbleAlpha(this, it)
+                FloatService.instance?.applyBubbleStyle()
+            },
+            mlp(mp, wc, dp(10))
+        )
+        set.addView(
+            toggleRow("Getar saat selesai", "Bubble bergetar halus waktu semua ketikan selesai", { Store.vibrate(this) }) { Store.setVibrate(this, it) },
+            mlp(mp, wc, dp(14))
+        )
+        set.addView(
+            toggleRow("Bunyi saat selesai", "Memutar nada notifikasi bawaan HP", { Store.sound(this) }) { Store.setSound(this, it) },
+            mlp(mp, wc, dp(12))
+        )
+        set.addView(
+            toggleRow("Jeda kalau keyboard tertutup", "Pengetikan berhenti otomatis kalau keyboard hilang", { Store.pauseNoKeyboard(this) }) { Store.setPauseNoKeyboard(this, it) },
+            mlp(mp, wc, dp(12))
+        )
+        set.addView(label("Batasi aplikasi", 16f, cText(), true), mlp(wc, wc, dp(16)))
+        set.addView(
+            label("Pengetikan hanya jalan di aplikasi pada daftar ini. Kosong = semua aplikasi. Untuk menambah: buka aplikasi tujuan, ketuk bubble, ketuk ikon gerigi, lalu Izinkan app ini.", 12f, cSub(), false),
+            mlp(wc, wc, dp(2))
+        )
+        val ab = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        appsBox = ab
+        set.addView(ab, mlp(mp, wc, dp(6)))
+        page.addView(set, mlp(mp, wc, dp(20)))
+
+        // ----- tombol aksesibilitas -----
+        val blue = cBlue()
+        val acc = TextView(this).apply {
             text = "Buka Pengaturan Aksesibilitas"
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
@@ -419,14 +514,239 @@ class MainActivity : Activity() {
             }
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         }
-        root.addView(title, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(36) })
-        root.addView(btnAcc, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
-        setContentView(root)
+        btnAcc = acc
+        page.addView(acc, mlp(mp, dp(58), dp(20)))
+
+        // ----- daftar template + cadangan -----
+        val tc = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = cardBg()
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        tc.addView(label("Template", 20f, cText(), true))
+        val lb = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        listBox = lb
+        tc.addView(lb, mlp(mp, wc, dp(8)))
+        val bk = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        bk.addView(chip("Ekspor cadangan", cBtn(), cText()) {
+            startActivity(Intent(this, MainActivity::class.java).putExtra("export", true))
+        })
+        bk.addView(chip("Pulihkan / impor", cBtn(), cText()) {
+            startActivity(Intent(this, MainActivity::class.java).putExtra("pick", true))
+        }, mlp(wc, wc, 0).apply { leftMargin = dp(8) })
+        tc.addView(bk, mlp(wc, wc, dp(12)))
+        page.addView(tc, mlp(mp, wc, dp(20)))
+
+        // ----- cara pakai -----
+        val how = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = cardBg()
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        how.addView(label("Cara pakai", 20f, cText(), true))
+        how.addView(
+            label(
+                "1. Ketuk tombol biru di atas, cari WansForce, lalu nyalakan layanannya.\n" +
+                    "2. Bubble \"T\" akan muncul di layar. Ketuk untuk membuka daftar template.\n" +
+                    "3. Ketuk + untuk membuat template, atau TXT untuk impor dari file.\n" +
+                    "4. Buka aplikasi tujuan, ketuk kolom ketik, lalu ketuk bubble dan tombol play.\n" +
+                    "5. Seret bubble ke ikon X di bawah untuk menutupnya. Munculkan lagi lewat tile WansForce di panel cepat atau buka apk ini.",
+                13f, cSub(), false
+            ),
+            mlp(wc, wc, dp(8))
+        )
+        page.addView(how, mlp(mp, wc, dp(20)))
+
+        setContentView(scroll)
+        refreshAll()
+    }
+
+    // ----- helper tampilan halaman utama -----
+    private var night = false
+    private var dens = 1f
+    private var statusView: TextView? = null
+    private var btnAcc: TextView? = null
+    private var listBox: LinearLayout? = null
+    private var appsBox: LinearLayout? = null
+
+    private fun dp(n: Int) = (n * dens + 0.5f).toInt()
+    private fun cText() = if (night) Color.WHITE else Color.parseColor("#1C1C1E")
+    private fun cSub() = Color.parseColor("#8E8E93")
+    private fun cBlue() = Color.parseColor(if (night) "#0A84FF" else "#007AFF")
+    private fun cBtn() = Color.parseColor(if (night) "#48484A" else "#C7C7CC")
+    private fun cardBg() = GradientDrawable().apply {
+        setColor(if (night) Color.parseColor("#2C2C2E") else Color.WHITE)
+        cornerRadius = dp(18).toFloat()
+    }
+
+    private fun mlp(w: Int, h: Int, top: Int) = LinearLayout.LayoutParams(w, h).apply { topMargin = top }
+
+    private fun label(s: String, size: Float, color: Int, bold: Boolean) = TextView(this).apply {
+        text = s
+        textSize = size
+        setTextColor(color)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun chip(s: String, bg: Int, fg: Int, onClick: (TextView) -> Unit) = TextView(this).apply {
+        text = s
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        setTextColor(fg)
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+        background = GradientDrawable().apply {
+            setColor(bg)
+            cornerRadius = dp(14).toFloat()
+        }
+        setOnClickListener { onClick(this) }
+    }
+
+    private fun toggleRow(title: String, desc: String, get: () -> Boolean, onSet: (Boolean) -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(label(title, 15f, cText(), true))
+        col.addView(label(desc, 12f, cSub(), false))
+        row.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val sw = Switch(this)
+        sw.isChecked = get()
+        sw.setOnCheckedChangeListener { _, v -> onSet(v) }
+        row.addView(sw)
+        return row
+    }
+
+    private fun seekRow(title: String, lo: Int, hi: Int, cur: Int, fmt: (Int) -> String, onChange: (Int) -> Unit): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val lbl = label(title + ": " + fmt(cur), 15f, cText(), true)
+        box.addView(lbl)
+        val sb = SeekBar(this)
+        sb.max = hi - lo
+        sb.progress = (cur - lo).coerceIn(0, hi - lo)
+        sb.progressTintList = ColorStateList.valueOf(cBlue())
+        sb.thumbTintList = ColorStateList.valueOf(cBlue())
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) {
+                if (!u) return
+                val v = p + lo
+                lbl.text = title + ": " + fmt(v)
+                onChange(v)
+            }
+
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(sb, mlp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT, dp(2)))
+        return box
+    }
+
+    private fun appLabel(pkg: String): String {
+        return try {
+            val n = packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+            if (n == pkg) pkg else n + " (" + pkg + ")"
+        } catch (e: Exception) {
+            pkg
+        }
+    }
+
+    private fun refreshStatus() {
+        val on = FloatService.instance != null
+        statusView?.text = if (on) "● Layanan aktif" else "● Layanan belum aktif"
+        statusView?.setTextColor(Color.parseColor(if (on) "#34C759" else "#FF3B30"))
+        btnAcc?.text = if (on) "Buka Pengaturan Aksesibilitas" else "Aktifkan di Pengaturan Aksesibilitas"
+    }
+
+    private fun refreshApps() {
+        val box = appsBox ?: return
+        box.removeAllViews()
+        val set = Store.allowedApps(this).sorted()
+        if (set.isEmpty()) {
+            box.addView(label("Semua aplikasi diizinkan.", 13f, cBlue(), true))
+            return
+        }
+        set.forEach { pkg ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(
+                label(appLabel(pkg), 13f, cText(), false).apply {
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            row.addView(chip("Hapus", cBtn(), cText()) {
+                val s = Store.allowedApps(this)
+                s.remove(pkg)
+                Store.setAllowedApps(this, s)
+                refreshApps()
+            })
+            box.addView(row, mlp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT, dp(6)))
+        }
+    }
+
+    private fun refreshTemplates() {
+        val box = listBox ?: return
+        box.removeAllViews()
+        val items = Store.load(this)
+        if (items.isEmpty()) {
+            box.addView(label("Belum ada template. Buat lewat bubble (ikon +) atau impor file lewat tombol di bawah.", 13f, cSub(), false))
+            return
+        }
+        items.forEachIndexed { i, t ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(label(t.name, 15f, cText(), true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            val n = t.text.split("\n").count { s -> s.isNotBlank() }
+            val sub = (if (t.mode == 1) "Angka" else "Standar") + (if (t.loop) " · ulang" else "") +
+                (if (t.mode == 1) "" else " · " + n + " baris")
+            col.addView(label(sub, 12f, cSub(), false))
+            row.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(chip("Hapus", cBtn(), cText()) { v ->
+                if (v.text.toString() == "Hapus") {
+                    // ketuk dua kali: pertama minta konfirmasi, kedua menghapus
+                    v.text = "Yakin?"
+                    v.setTextColor(Color.WHITE)
+                    (v.background as? GradientDrawable)?.setColor(Color.parseColor("#FF3B30"))
+                    v.postDelayed({
+                        v.text = "Hapus"
+                        v.setTextColor(cText())
+                        (v.background as? GradientDrawable)?.setColor(cBtn())
+                    }, 3000)
+                } else {
+                    val all = Store.load(this)
+                    if (i < all.size && all[i].name == t.name) {
+                        all.removeAt(i)
+                        Store.save(this, all)
+                    }
+                    refreshTemplates()
+                }
+            })
+            box.addView(row, mlp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT, dp(10)))
+        }
+    }
+
+    private fun refreshAll() {
+        refreshStatus()
+        refreshApps()
+        refreshTemplates()
     }
 
     override fun onResume() {
         super.onResume()
-        if (!pickMode && !exportMode) FloatService.instance?.showBubble()
+        if (!pickMode && !exportMode) {
+            FloatService.instance?.showBubble()
+            refreshAll()
+        }
     }
 
     private fun openPicker() {
@@ -812,8 +1132,8 @@ class FloatService : AccessibilityService() {
         instance = this
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         bp = lp().apply {
-            width = dp(64)
-            height = dp(64)
+            width = bsz()
+            height = bsz()
             x = if (Store.bubbleX(this@FloatService) >= 0) Store.bubbleX(this@FloatService) else dp(8)
             y = if (Store.bubbleY(this@FloatService) >= 0) Store.bubbleY(this@FloatService) else dp(160)
         }
@@ -871,9 +1191,20 @@ class FloatService : AccessibilityService() {
                 return true
             }
         })
+        b.alpha = Store.bubbleAlpha(this) / 100f
         wm.addView(b, bp)
         bubble = b
         refreshBubble()
+
+        // supaya bisa mendeteksi jendela keyboard (untuk opsi "jeda kalau keyboard tertutup")
+        try {
+            val si = serviceInfo
+            if (si != null) {
+                si.flags = si.flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                serviceInfo = si
+            }
+        } catch (e: Exception) {
+        }
 
         val f = IntentFilter()
         f.addAction(Intent.ACTION_SCREEN_OFF)
@@ -889,9 +1220,25 @@ class FloatService : AccessibilityService() {
     }
 
     // ----- menempel ke tepi layar + simpan posisi -----
+    private fun bsz(): Int = dp(Store.bubbleSize(this))
+
+    // Dipanggil dari halaman utama saat ukuran / transparansi diubah
+    fun applyBubbleStyle() {
+        val b = bubble ?: return
+        bp.width = bsz()
+        bp.height = bsz()
+        b.alpha = Store.bubbleAlpha(this) / 100f
+        if (!hidden) {
+            try {
+                wm.updateViewLayout(b, bp)
+            } catch (e: Exception) {
+            }
+        }
+    }
+
     private fun snapBubble(v: View) {
         val dm = resources.displayMetrics
-        val w = dp(64)
+        val w = bsz()
         val tx = if (bp.x + w / 2 < dm.widthPixels / 2) dp(8) else dm.widthPixels - w - dp(8)
         bp.y = bp.y.coerceIn(dp(24), dm.heightPixels - w - dp(48))
         val from = bp.x
@@ -918,8 +1265,16 @@ class FloatService : AccessibilityService() {
     private fun celebrate() {
         val b = bubble ?: return
         b.pulseRing()
-        val type = if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS
-        b.performHapticFeedback(type)
+        if (Store.vibrate(this)) {
+            val type = if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS
+            b.performHapticFeedback(type)
+        }
+        if (Store.sound(this)) {
+            try {
+                RingtoneManager.getRingtone(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))?.play()
+            } catch (e: Exception) {
+            }
+        }
     }
 
     // ----- tutup bubble: tarik ke bawah tengah layar -----
@@ -1102,6 +1457,23 @@ class FloatService : AccessibilityService() {
                 txt("Langsung = tanpa clipboard, jadi tidak ada popup 'disalin/ditempel' dan lebih ringan. Kalau teks tidak masuk di aplikasimu, kembali ke Clipboard.", 12f, cGray(), false),
                 mlp(WRAP, WRAP, 0, dp(4), 0, 0)
             )
+            box.addView(txt("Batasi aplikasi", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
+            val apSet = Store.allowedApps(this)
+            box.addView(
+                txt(if (apSet.isEmpty()) "Semua aplikasi diizinkan" else apSet.size.toString() + " aplikasi diizinkan", 13f, cBlue(), true),
+                mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+            )
+            val apRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            apRow.addView(pill("Izinkan app ini", cBtnGray(), cPrimary()) { allowCurrentApp() })
+            apRow.addView(pill("Semua app", cBtnGray(), cPrimary()) {
+                Store.setAllowedApps(this, emptySet())
+                openPanel("set")
+            })
+            box.addView(apRow, mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+            box.addView(
+                txt("Buka aplikasi tujuan, ketuk bubble > gerigi > Izinkan app ini. Pengetikan hanya jalan di aplikasi yang diizinkan. Daftar lengkap dan tombol hapus ada di halaman utama apk.", 12f, cGray(), false),
+                mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+            )
             box.addView(txt("Cadangan template", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
             val bk = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             bk.addView(pill("Ekspor", cBtnGray(), cPrimary()) { exportFile() })
@@ -1207,7 +1579,7 @@ class FloatService : AccessibilityService() {
 
         // Panel ditaruh di bawah bubble kalau muat, kalau tidak di atasnya, jadi bubble tidak pernah tertutup
         val dm = resources.displayMetrics
-        val below = dm.heightPixels - (bp.y + dp(64)) - dp(16)
+        val below = dm.heightPixels - (bp.y + bsz()) - dp(16)
         val above = bp.y - dp(32)
         val placeBelow = below >= dp(408) || below >= above
         val avail = if (placeBelow) below else above
@@ -1232,7 +1604,7 @@ class FloatService : AccessibilityService() {
         val pp = lp().apply {
             width = pw
             x = maxOf(0, minOf(bp.x, sw - pw - dp(8)))
-            y = if (placeBelow) bp.y + dp(64) + dp(8) else maxOf(dp(24), bp.y - ph - dp(8))
+            y = if (placeBelow) bp.y + bsz() + dp(8) else maxOf(dp(24), bp.y - ph - dp(8))
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
         }
         // ketuk di luar panel = tutup panel (kecuali yang diketuk adalah bubble, itu sudah ditangani bubble)
@@ -1315,16 +1687,29 @@ class FloatService : AccessibilityService() {
             openPanel("list")
         })
         if (cur != null) {
-            btns.addView(pill("Hapus", cRed(), Color.WHITE) {
-                val all = Store.load(this)
-                if (index >= 0 && index < all.size) {
-                    pos.remove(keyOf(all[index]))
-                    all.removeAt(index)
-                    Store.save(this, all)
+            // ketuk dua kali: pertama minta konfirmasi, kedua baru menghapus
+            var armed = false
+            val del = pill("Hapus", cRed(), Color.WHITE) {}
+            del.setOnClickListener {
+                if (!armed) {
+                    armed = true
+                    del.text = "Yakin?"
+                    del.postDelayed({
+                        armed = false
+                        del.text = "Hapus"
+                    }, 3000)
+                } else {
+                    val all = Store.load(this)
+                    if (index >= 0 && index < all.size) {
+                        pos.remove(keyOf(all[index]))
+                        all.removeAt(index)
+                        Store.save(this, all)
+                    }
+                    closeEditor()
+                    openPanel("list")
                 }
-                closeEditor()
-                openPanel("list")
-            })
+            }
+            btns.addView(del)
         }
         btns.addView(pill("Simpan", cBlue(), Color.WHITE) {
             val nm = etName.text.toString().trim()
@@ -1595,17 +1980,56 @@ class FloatService : AccessibilityService() {
         }
     }
 
-    private fun clickSend(): Boolean {
-        val root = rootInActiveWindow ?: return false
-        for (key in listOf("Kirim", "Send")) {
-            val found = root.findAccessibilityNodeInfosByText(key) ?: continue
-            for (f in found) {
-                var x: AccessibilityNodeInfo? = f
-                while (x != null && !x.isClickable) x = x.parent
-                if (x != null && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-            }
+    // Kata pada tombol kirim di berbagai aplikasi (teks atau deskripsi konten)
+    private val sendWords = listOf(
+        "Kirim", "Send", "Kirim pesan", "Send message", "Kirimkan", "Submit", "Post", "Posting",
+        "Balas", "Reply", "Komentar", "Comment", "Tulis balasan"
+    )
+
+    private fun clickUp(n: AccessibilityNodeInfo?): Boolean {
+        var x = n
+        var guard = 0
+        while (x != null && !x.isClickable && guard < 6) {
+            x = x.parent
+            guard++
+        }
+        return x != null && x.isClickable && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    // Cocok kalau label sama persis, atau pendek (maks 20 huruf) dan diawali kata itu.
+    // Supaya isi pesan yang kebetulan memuat kata "send" tidak ikut terketuk.
+    private fun isSendLabel(n: AccessibilityNodeInfo, key: String): Boolean {
+        val labels = listOf(n.text?.toString(), n.contentDescription?.toString())
+        for (l in labels) {
+            val s = l?.trim() ?: continue
+            if (s.equals(key, true) || (s.length <= 20 && s.startsWith(key, true))) return true
         }
         return false
+    }
+
+    // Cari tombol berdasarkan id view yang memuat kata send/kirim (untuk tombol berupa ikon tanpa teks)
+    private fun findSendById(n: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
+        if (n == null || depth > 30) return null
+        val id = n.viewIdResourceName?.lowercase()
+        if (id != null && (id.contains("send") || id.contains("kirim")) && n.isVisibleToUser && n.isEnabled) return n
+        for (i in 0 until n.childCount) {
+            val r = findSendById(n.getChild(i), depth + 1)
+            if (r != null) return r
+        }
+        return null
+    }
+
+    private fun clickSend(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        for (key in sendWords) {
+            val found = root.findAccessibilityNodeInfosByText(key) ?: continue
+            for (f in found) {
+                if (!f.isVisibleToUser || !isSendLabel(f, key)) continue
+                if (clickUp(f)) return true
+            }
+        }
+        // cadangan: tombol ikon yang id-nya memuat send/kirim
+        return clickUp(findSendById(root, 0))
     }
 
     private fun pressEnter(given: AccessibilityNodeInfo? = null) {
@@ -1723,6 +2147,37 @@ class FloatService : AccessibilityService() {
         }
     }
 
+    // Daftar aplikasi kosong = semua diizinkan
+    private fun appAllowed(pkg: String): Boolean {
+        if (pkg.isEmpty()) return true
+        val set = Store.allowedApps(this)
+        return set.isEmpty() || set.contains(pkg)
+    }
+
+    private fun allowCurrentApp() {
+        val pkg = rootInActiveWindow?.packageName?.toString() ?: ""
+        if (pkg.isEmpty() || pkg == packageName) {
+            toast("Buka dulu aplikasi tujuan, lalu ketuk bubble")
+            return
+        }
+        val set = Store.allowedApps(this)
+        set.add(pkg)
+        Store.setAllowedApps(this, set)
+        toast("Diizinkan: " + pkg)
+        openPanel("set")
+    }
+
+    // true kalau ada jendela keyboard. Kalau daftar jendela tidak bisa dibaca (kosong), dianggap terbuka
+    // supaya pengetikan tidak berhenti salah.
+    private fun keyboardVisible(): Boolean {
+        return try {
+            val w = windows
+            if (w.isNullOrEmpty()) true else w.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } catch (e: Exception) {
+            true
+        }
+    }
+
     private fun stepInner() {
         val ms = Store.delayMs(this)
         val turbo = ms == 0
@@ -1744,6 +2199,11 @@ class FloatService : AccessibilityService() {
                 return
             }
             val pkg = f.packageName?.toString() ?: ""
+            if (!appAllowed(pkg)) {
+                pause()
+                toast("Aplikasi ini tidak ada di daftar yang diizinkan. Atur di halaman utama WansForce")
+                return
+            }
             if (typingPkg == "") {
                 typingPkg = pkg
             } else if (pkg != "" && pkg != typingPkg) {
@@ -1753,6 +2213,13 @@ class FloatService : AccessibilityService() {
             }
             node = f
             turboNode = if (turbo) f else null
+        }
+
+        if (Store.pauseNoKeyboard(this) && !keyboardVisible()) {
+            turboNode = null
+            pause()
+            toast("Keyboard tertutup, dijeda. Buka keyboard lalu ketuk play")
+            return
         }
 
         var cur: AccessibilityNodeInfo = node ?: return
