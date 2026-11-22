@@ -1,0 +1,349 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Buat project
+        run: |
+          mkdir -p app/src/main/java/com/wans/tpl app/src/main/res/xml app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'TemplateMelayang'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.wans.tpl'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.wans.tpl'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/ic_menu_edit"
+                  android:label="Template Melayang">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".FloatService"
+                      android:exported="true"
+                      android:label="Template Melayang"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeViewFocused"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/desc"
+              android:notificationTimeout="100" />
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="desc">Menampilkan bubble melayang berisi template teks dan menempelkannya ke kolom ketik yang sedang aktif.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/wans/tpl/Store.kt <<'EOF'
+          package com.wans.tpl
+
+          import android.content.Context
+
+          object Store {
+              private const val SEP = "\u0001"
+
+              fun load(c: Context): MutableList<String> {
+                  val s = c.getSharedPreferences("tpl", 0).getString("items", "") ?: ""
+                  return if (s.isEmpty()) mutableListOf() else s.split(SEP).toMutableList()
+              }
+
+              fun save(c: Context, l: List<String>) {
+                  c.getSharedPreferences("tpl", 0).edit().putString("items", l.joinToString(SEP)).apply()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/wans/tpl/MainActivity.kt <<'EOF'
+          package com.wans.tpl
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.ViewGroup
+          import android.widget.ArrayAdapter
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              private lateinit var list: MutableList<String>
+              private lateinit var adapter: ArrayAdapter<String>
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  list = Store.load(this)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(40, 80, 40, 40)
+                  }
+                  val info = TextView(this).apply {
+                      text = "1) Aktifkan 'Template Melayang' di Aksesibilitas.\n2) Bubble 'T' akan muncul, bisa digeser.\n3) Klik kolom ketik di aplikasi lain, lalu ketuk bubble dan pilih template.\n\nTahan lama sebuah template di daftar untuk menghapusnya."
+                  }
+                  val btnAcc = Button(this).apply {
+                      text = "Buka Pengaturan Aksesibilitas"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  }
+                  val input = EditText(this).apply {
+                      hint = "Tulis template baru"
+                      minLines = 3
+                      gravity = Gravity.TOP
+                  }
+                  val btnAdd = Button(this).apply { text = "Tambah Template" }
+                  val lv = ListView(this)
+                  adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, list)
+                  lv.adapter = adapter
+
+                  btnAdd.setOnClickListener {
+                      val t = input.text.toString()
+                      if (t.isNotBlank()) {
+                          list.add(t)
+                          Store.save(this, list)
+                          adapter.notifyDataSetChanged()
+                          input.setText("")
+                      }
+                  }
+                  lv.setOnItemLongClickListener { _, _, pos, _ ->
+                      list.removeAt(pos)
+                      Store.save(this, list)
+                      adapter.notifyDataSetChanged()
+                      true
+                  }
+
+                  root.addView(info)
+                  root.addView(btnAcc)
+                  root.addView(input)
+                  root.addView(btnAdd)
+                  root.addView(lv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+                  setContentView(root)
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/wans/tpl/FloatService.kt <<'EOF'
+          package com.wans.tpl
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class FloatService : AccessibilityService() {
+              private lateinit var wm: WindowManager
+              private lateinit var bp: WindowManager.LayoutParams
+              private var bubble: View? = null
+              private var panel: View? = null
+
+              override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              private fun lp(): WindowManager.LayoutParams = WindowManager.LayoutParams(
+                  WindowManager.LayoutParams.WRAP_CONTENT,
+                  WindowManager.LayoutParams.WRAP_CONTENT,
+                  WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                  PixelFormat.TRANSLUCENT
+              ).apply { gravity = Gravity.TOP or Gravity.START }
+
+              private fun bg(color: Int, r: Float, oval: Boolean = false) = GradientDrawable().apply {
+                  if (oval) shape = GradientDrawable.OVAL
+                  setColor(color)
+                  cornerRadius = r
+              }
+
+              private fun tv(t: String) = TextView(this).apply {
+                  text = t
+                  setTextColor(Color.WHITE)
+                  textSize = 14f
+                  setPadding(24, 20, 24, 20)
+                  maxLines = 3
+                  ellipsize = TextUtils.TruncateAt.END
+                  background = bg(Color.parseColor("#33FFFFFF"), 16f)
+                  layoutParams = LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  ).apply { setMargins(0, 0, 0, 8) }
+              }
+
+              override fun onServiceConnected() {
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  bp = lp().apply { width = 120; height = 120; x = 0; y = 400 }
+
+                  val b = TextView(this).apply {
+                      text = "T"
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      textSize = 20f
+                      background = bg(Color.parseColor("#E6007AFF"), 60f, true)
+                  }
+                  b.setOnTouchListener(object : View.OnTouchListener {
+                      var sx = 0
+                      var sy = 0
+                      var tx = 0f
+                      var ty = 0f
+                      var moved = false
+                      override fun onTouch(v: View, ev: MotionEvent): Boolean {
+                          when (ev.action) {
+                              MotionEvent.ACTION_DOWN -> {
+                                  sx = bp.x; sy = bp.y; tx = ev.rawX; ty = ev.rawY; moved = false
+                              }
+                              MotionEvent.ACTION_MOVE -> {
+                                  val dx = (ev.rawX - tx).toInt()
+                                  val dy = (ev.rawY - ty).toInt()
+                                  if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
+                                  if (moved) {
+                                      bp.x = sx + dx
+                                      bp.y = sy + dy
+                                      wm.updateViewLayout(v, bp)
+                                      closePanel()
+                                  }
+                              }
+                              MotionEvent.ACTION_UP -> if (!moved) toggle()
+                          }
+                          return true
+                      }
+                  })
+                  wm.addView(b, bp)
+                  bubble = b
+              }
+
+              private fun toggle() {
+                  if (panel != null) closePanel() else openPanel()
+              }
+
+              private fun openPanel() {
+                  val items = Store.load(this)
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = bg(Color.parseColor("#EE222222"), 24f)
+                      setPadding(16, 16, 16, 16)
+                  }
+                  if (items.isEmpty()) box.addView(tv("Belum ada template. Tambahkan di apk."))
+                  items.forEach { t -> box.addView(tv(t).apply { setOnClickListener { insert(t) } }) }
+                  val sv = ScrollView(this).apply { addView(box) }
+                  val pp = lp().apply { x = bp.x; y = bp.y + 140; width = 640; height = 700 }
+                  wm.addView(sv, pp)
+                  panel = sv
+              }
+
+              private fun closePanel() {
+                  panel?.let { wm.removeView(it) }
+                  panel = null
+              }
+
+              private fun insert(t: String) {
+                  val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                  if (node == null) {
+                      Toast.makeText(this, "Klik kolom ketik dulu", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                  cm.setPrimaryClip(ClipData.newPlainText("tpl", t))
+                  if (!node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
+                      val cur = node.text?.toString() ?: ""
+                      val args = Bundle()
+                      args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cur + t)
+                      node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                  }
+                  closePanel()
+              }
+
+              override fun onDestroy() {
+                  closePanel()
+                  bubble?.let { wm.removeView(it) }
+                  bubble = null
+                  super.onDestroy()
+              }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TemplateMelayang
+          path: app/build/outputs/apk/debug/*.apk
