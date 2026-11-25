@@ -185,6 +185,36 @@ object Store {
         c.getSharedPreferences("tpl", 0).edit().putInt("enter", v).apply()
     }
 
+    // Cara Enter khusus per aplikasi (nama paket -> mode). Kalau tidak ada, pakai enterMode() global.
+    private fun enterMap(c: Context): JSONObject {
+        val j = c.getSharedPreferences("tpl", 0).getString("enterMap", null) ?: return JSONObject()
+        return try { JSONObject(j) } catch (e: Exception) { JSONObject() }
+    }
+
+    fun enterModeFor(c: Context, pkg: String): Int {
+        if (pkg.isEmpty()) return enterMode(c)
+        val m = enterMap(c)
+        return if (m.has(pkg)) m.getInt(pkg) else enterMode(c)
+    }
+
+    fun hasEnterOverride(c: Context, pkg: String): Boolean = pkg.isNotEmpty() && enterMap(c).has(pkg)
+
+    fun setEnterModeFor(c: Context, pkg: String, v: Int) {
+        if (pkg.isEmpty()) return
+        val m = enterMap(c)
+        m.put(pkg, v)
+        c.getSharedPreferences("tpl", 0).edit().putString("enterMap", m.toString()).apply()
+    }
+
+    fun clearEnterModeFor(c: Context, pkg: String) {
+        if (pkg.isEmpty()) return
+        val m = enterMap(c)
+        m.remove(pkg)
+        c.getSharedPreferences("tpl", 0).edit().putString("enterMap", m.toString()).apply()
+    }
+
+    fun enterOverrideCount(c: Context): Int = enterMap(c).length()
+
     // Ukuran bubble (dp) dan transparansi (persen)
     fun bubbleSize(c: Context): Int = c.getSharedPreferences("tpl", 0).getInt("bsz", 64).coerceIn(48, 88)
 
@@ -1443,6 +1473,42 @@ class FloatService : AccessibilityService() {
                 txt("Enter = tombol enter keyboard. Kolom = pindah ke kolom berikutnya. Kirim = ketuk tombol Kirim/Send di layar.", 12f, cGray(), false),
                 mlp(WRAP, WRAP, 0, dp(4), 0, 0)
             )
+
+            // Cara Enter khusus per aplikasi, karena letak/cara kirim beda-beda tiap app
+            val curPkg = rootInActiveWindow?.packageName?.toString()?.let { if (it == packageName) "" else it } ?: ""
+            val ovrCount = Store.enterOverrideCount(this)
+            box.addView(
+                txt(
+                    "Enter per aplikasi" + if (ovrCount > 0) " ($ovrCount app punya pengaturan khusus)" else "",
+                    16f, cPrimary(), true
+                ),
+                mlp(WRAP, WRAP, 0, dp(14), 0, 0)
+            )
+            if (curPkg.isEmpty()) {
+                box.addView(
+                    txt("Buka dulu aplikasi tujuan (mis. WhatsApp/Shopee), lalu ketuk bubble > gerigi lagi untuk atur Enter khusus app itu.", 12f, cGray(), false),
+                    mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+                )
+            } else {
+                box.addView(txt(curPkg, 12f, cBlue(), true), mlp(WRAP, WRAP, 0, dp(4), 0, 0))
+                val curMode = Store.enterModeFor(this, curPkg)
+                val hasOvr = Store.hasEnterOverride(this, curPkg)
+                val appModes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                listOf("Enter", "Kolom", "Kirim").forEachIndexed { i, nm ->
+                    appModes.addView(pill(nm, if (curMode == i) cBlue() else cBtnGray(), if (curMode == i) Color.WHITE else cPrimary()) {
+                        Store.setEnterModeFor(this, curPkg, i)
+                        openPanel("set")
+                    })
+                }
+                box.addView(appModes, mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+                if (hasOvr) {
+                    box.addView(pill("Pakai default (hapus khusus app ini)", cBtnGray(), cPrimary()) {
+                        Store.clearEnterModeFor(this, curPkg)
+                        openPanel("set")
+                    }, mlp(WRAP, WRAP, 0, dp(6), 0, 0))
+                }
+            }
+
             box.addView(txt("Cara tempel", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(14), 0, 0))
             val pm = Store.pasteMode(this)
             val pastes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -2037,7 +2103,7 @@ class FloatService : AccessibilityService() {
         val n = given ?: findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         var ok = false
         try {
-            when (Store.enterMode(this)) {
+            when (Store.enterModeFor(this, typingPkg)) {
                 1 -> {
                     val nx = n?.focusSearch(View.FOCUS_FORWARD)
                     ok = nx?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) ?: false
@@ -2186,7 +2252,7 @@ class FloatService : AccessibilityService() {
         // Turbo memakai ulang kolom ketik yang sama dan memeriksa ulang tiap 10 ketikan
         var node: AccessibilityNodeInfo? = null
         var cached = false
-        if (turbo && turboNode != null && turboCount % 10 != 0 && Store.enterMode(this) != 1) {
+        if (turbo && turboNode != null && turboCount % 10 != 0 && Store.enterModeFor(this, typingPkg) != 1) {
             node = turboNode
             cached = true
         }
