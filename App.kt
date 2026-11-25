@@ -931,6 +931,8 @@ class FloatService : AccessibilityService() {
     private var panelMode = ""
     private var panelInfo: TextView? = null
     private var turboNode: AccessibilityNodeInfo? = null
+    // Kolom ketik terakhir yang dipakai, untuk coba fokus ulang otomatis kalau fokus hilang setelah Enter/Kirim
+    private var lastNode: AccessibilityNodeInfo? = null
     private var locked = false
     private var lastBubbleDown = 0L
 
@@ -2101,9 +2103,10 @@ class FloatService : AccessibilityService() {
     private fun pressEnter(given: AccessibilityNodeInfo? = null) {
         needEnter = false
         val n = given ?: findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val mode = Store.enterModeFor(this, typingPkg)
         var ok = false
         try {
-            when (Store.enterModeFor(this, typingPkg)) {
+            when (mode) {
                 1 -> {
                     val nx = n?.focusSearch(View.FOCUS_FORWARD)
                     ok = nx?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) ?: false
@@ -2117,6 +2120,18 @@ class FloatService : AccessibilityService() {
             ok = false
         }
         afterEnter = ok
+        // Banyak app melepas fokus dari kolom ketik setelah Enter/Kirim ditekan.
+        // Coba fokuskan balik kolom yang sama supaya langkah berikutnya tidak perlu klik manual.
+        // Tidak dilakukan untuk mode "Kolom" karena di situ memang sengaja pindah ke kolom lain.
+        if (ok && mode != 1) {
+            try {
+                val refocus = n ?: lastNode
+                if (refocus != null && refocus.refresh()) {
+                    refocus.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                }
+            } catch (e: Exception) {
+            }
+        }
         if (!ok && !warned) {
             warned = true
             toast("Enter gagal. Coba ganti Cara Enter di pengaturan (ikon gerigi)")
@@ -2258,7 +2273,17 @@ class FloatService : AccessibilityService() {
         }
         turboCount++
         if (node == null) {
-            val f = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            var f = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (f == null) {
+                // Coba fokuskan balik kolom terakhir sebelum menyerah, biar tidak perlu klik manual
+                try {
+                    val ln = lastNode
+                    if (ln != null && ln.refresh() && ln.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
+                        f = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                    }
+                } catch (e: Exception) {
+                }
+            }
             if (f == null) {
                 pause()
                 toast("Kolom ketik hilang, dijeda. Klik kolom ketik lalu ketuk bubble > play")
@@ -2289,12 +2314,14 @@ class FloatService : AccessibilityService() {
         }
 
         var cur: AccessibilityNodeInfo = node ?: return
+        lastNode = cur
         var ok = if (turbo) pasteTurbo(cur, text) else paste(cur, text)
         if (!ok && cached) {
             // kolom lama sudah tidak valid, cari ulang sekali
             val fresh = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             if (fresh != null) {
                 cur = fresh
+                lastNode = fresh
                 turboNode = fresh
                 ok = pasteTurbo(fresh, text)
             }
