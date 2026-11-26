@@ -64,7 +64,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 // ===== Data template =====
-class Tpl(val name: String, val text: String, val mode: Int = 0, val loop: Boolean = false)
+class Tpl(val name: String, val text: String, val mode: Int = 0, val loop: Boolean = false, val show: Boolean = false)
 
 // Titik klik mode manual: posisi layar (x, y) dan jeda (ms) setelah titik ini diklik sebelum titik berikutnya
 class MPoint(val x: Int, val y: Int, val ms: Int)
@@ -86,7 +86,7 @@ object Store {
                     val body = o.getString("c")
                     val md = if (o.has("m")) o.getInt("m")
                     else if (body.indexOf('\n') < 0 && Regex("\\{\\d{1,9}\\}").containsMatchIn(body)) 1 else 0
-                    out.add(Tpl(o.getString("n"), body, md, o.optBoolean("l", false)))
+                    out.add(Tpl(o.getString("n"), body, md, o.optBoolean("l", false), o.optBoolean("s", false)))
                 }
             } catch (e: Exception) {
             }
@@ -109,6 +109,7 @@ object Store {
             o.put("c", it.text)
             o.put("m", it.mode)
             o.put("l", it.loop)
+            o.put("s", it.show)
             a.put(o)
         }
         return a.toString(2)
@@ -127,7 +128,7 @@ object Store {
                 val n = o.getString("n")
                 val body = o.getString("c")
                 if (all.any { it.name == n && it.text == body }) continue
-                all.add(Tpl(n, body, o.optInt("m", 0), o.optBoolean("l", false)))
+                all.add(Tpl(n, body, o.optInt("m", 0), o.optBoolean("l", false), o.optBoolean("s", false)))
                 added++
             }
             save(c, all)
@@ -145,6 +146,7 @@ object Store {
             o.put("c", it.text)
             o.put("m", it.mode)
             o.put("l", it.loop)
+            o.put("s", it.show)
             a.put(o)
         }
         c.getSharedPreferences("tpl", 0).edit().putString("data", a.toString()).apply()
@@ -994,6 +996,7 @@ class FloatService : AccessibilityService() {
     private var typingPkg = ""
     private var lastStepAt = 0L
     private var panelMode = ""
+    private var panelLp: WindowManager.LayoutParams? = null
     private var panelInfo: TextView? = null
     private var turboNode: AccessibilityNodeInfo? = null
     // Kolom ketik terakhir yang dipakai, untuk coba fokus ulang otomatis kalau fokus hilang setelah Enter/Kirim
@@ -1646,63 +1649,32 @@ class FloatService : AccessibilityService() {
             val done = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             done.addView(pill("Selesai", cBlue(), Color.WHITE) { openPanel(homePanel()) })
             box.addView(done, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
-        } else if (mode == "mset") {
-            addModePills(box)
-            val done = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            done.addView(pill("Selesai", cBlue(), Color.WHITE) { openPanel("manual") })
-            box.addView(done, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
         } else if (mode == "manual") {
+            addModePills(box)
             val pts = Store.manualPoints(this)
             val ml = Store.manualLoop(this)
-            val head = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            col.addView(txt("Mode manual", 20f, cPrimary(), true))
-            col.addView(
+            box.addView(
                 txt(
                     if (manualRunning) "Berjalan: titik " + (minOf(manualIdx + 1, maxOf(pts.size, 1))).toString() + " dari " + pts.size.toString()
                     else pts.size.toString() + " titik" + (if (ml) " \u00B7 ulang" else " \u00B7 sekali"),
                     12f, cGray(), false
-                )
+                ),
+                mlp(WRAP, WRAP, 0, dp(12), 0, 0)
             )
-            head.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
-            head.addView(circleBtn("\u2699", cBtnGray(), 36) { openPanel("mset") })
-            box.addView(head)
 
-            val r1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            r1.addView(pill("+ Titik", cBtnGray(), cPrimary()) { addPoint() })
-            r1.addView(pill("Isi ms manual", cBtnGray(), cPrimary()) {
-                closePanel()
-                showManualEditor()
-            })
-            box.addView(r1, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
-
-            val dms = Store.manualDelayMs(this)
-            val dl = txt(mdLabel(dms), 14f, cBlue(), true).apply { setPadding(0, dp(10), 0, dp(4)) }
-            box.addView(dl)
-            val dsb = SeekBar(this).apply {
-                max = 100
-                progress = minOf(100, dms / 50)
-                progressTintList = ColorStateList.valueOf(cBlue())
-                thumbTintList = ColorStateList.valueOf(cBlue())
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(sb: SeekBar?, pr: Int, u: Boolean) {
-                        if (!u) return
-                        dl.text = mdLabel(pr * 50)
-                        Store.setManualDelayMs(this@FloatService, pr * 50)
-                    }
-
-                    override fun onStartTrackingTouch(sb: SeekBar?) {}
-                    override fun onStopTrackingTouch(sb: SeekBar?) {}
-                })
+            // kurangi / tambah titik
+            val tr = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
             }
-            box.addView(dsb, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
-            box.addView(
-                txt("Kiri = Turbo (klik beruntun tanpa jeda), kanan = lambat (maks 5 detik). Mau lebih lama, pakai Isi ms manual.", 12f, cGray(), false),
-                mlp(WRAP, WRAP, 0, dp(4), 0, 0)
-            )
+            tr.addView(txt("Titik", 16f, cPrimary(), true), LinearLayout.LayoutParams(0, WRAP, 1f))
+            tr.addView(circleBtn("\u2212", cRed(), 40) { removePoint() })
+            tr.addView(txt(pts.size.toString(), 18f, cPrimary(), true).apply {
+                gravity = Gravity.CENTER
+                minWidth = dp(36)
+            })
+            tr.addView(circleBtn("+", cBlue(), 40) { addPoint() })
+            box.addView(tr, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
 
             val r2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             listOf("Sekali", "Ulang \u21BB").forEachIndexed { i, nm ->
@@ -1712,7 +1684,7 @@ class FloatService : AccessibilityService() {
                     openPanel("manual")
                 })
             }
-            box.addView(r2, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+            box.addView(r2, mlp(MATCH, WRAP, 0, dp(10), 0, 0))
 
             val r3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             if (manualRunning) {
@@ -1724,19 +1696,6 @@ class FloatService : AccessibilityService() {
                 r3.addView(pill("Mulai", cGreen(), Color.WHITE) { manualStart() })
             }
             box.addView(r3, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
-
-            val chipsOn = Store.manualChips(this)
-            val rc = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            rc.addView(pill(if (chipsOn) "Template: Tampil" else "Template: Sembunyi", if (chipsOn) cBlue() else cBtnGray(), if (chipsOn) Color.WHITE else cPrimary()) {
-                Store.setManualChips(this, !chipsOn)
-                showMarkers()
-                openPanel("manual")
-            })
-            rc.addView(pill("+ Template", cBtnGray(), cPrimary()) {
-                closePanel()
-                showEditor(-1)
-            })
-            box.addView(rc, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
 
             // ketuk dua kali: pertama minta konfirmasi, kedua baru menghapus
             var armed = false
@@ -1760,12 +1719,46 @@ class FloatService : AccessibilityService() {
             val r4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             r4.addView(clr)
             box.addView(r4, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+
+            // template yang muncul di layar (bisa lebih dari satu)
+            box.addView(txt("Template di layar", 16f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(16), 0, 0))
+            val tpls = Store.load(this)
+            if (tpls.isEmpty()) {
+                box.addView(txt("Belum ada template. Ketuk + Template.", 12f, cGray(), false), mlp(WRAP, WRAP, 0, dp(4), 0, 0))
+            }
+            tpls.forEachIndexed { i, t ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = card(dp(14).toFloat())
+                    setPadding(dp(12), dp(6), dp(8), dp(6))
+                }
+                row.addView(txt(t.name, 15f, cPrimary(), true).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(0, WRAP, 1f))
+                val sw = Switch(this)
+                sw.isChecked = t.show
+                sw.setOnCheckedChangeListener { _, on -> setTplShow(i, on) }
+                row.addView(sw)
+                row.addView(circleBtn("\u270E", cBtnGray(), 36) {
+                    closePanel()
+                    showEditor(i)
+                })
+                box.addView(row, mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+            }
+            val rt = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            rt.addView(pill("+ Template", cBtnGray(), cPrimary()) {
+                closePanel()
+                showEditor(-1)
+            })
+            box.addView(rt, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
             box.addView(
                 txt(
-                    "Ketuk + Titik, lalu geser angka biru ke tempat yang mau diklik. Klik jalan berurutan: titik berikutnya baru diklik setelah titik sebelumnya selesai dan jedanya habis. Ketuk bubble untuk berhenti. Kotak Template di layar tidak hilang setelah diketuk: tiap ketuk menempel isi berikutnya, jadi bisa dijadikan salah satu titik klik.",
+                    "Ketuk +, lalu geser angka biru ke tempat yang mau diklik. Ketuk angkanya (tanpa geser) untuk atur jeda titik itu. Klik berjalan berurutan: titik berikutnya baru diklik setelah titik sebelumnya selesai dan jedanya habis. Ketuk bubble untuk berhenti. Template yang diaktifkan muncul sebagai tombol melayang, tidak hilang setelah diketuk, tiap ketuk menempel isi berikutnya.",
                     12f, cGray(), false
                 ),
-                mlp(WRAP, WRAP, 0, dp(8), 0, 0)
+                mlp(WRAP, WRAP, 0, dp(10), 0, 0)
             )
         } else {
             val head = LinearLayout(this).apply {
@@ -1900,6 +1893,7 @@ class FloatService : AccessibilityService() {
         blur(pp)
         wm.addView(wrap, pp)
         panel = wrap
+        panelLp = pp
     }
 
     private fun closePanel() {
@@ -1933,7 +1927,7 @@ class FloatService : AccessibilityService() {
         Store.setManualMode(this, on)
         if (on) showMarkers() else hideMarkers()
         refreshBubble()
-        openPanel(if (on) "mset" else "set")
+        openPanel(if (on) "manual" else "set")
     }
 
     private fun hideMarkers() {
@@ -1951,9 +1945,9 @@ class FloatService : AccessibilityService() {
     private fun showMarkers() {
         hideMarkers()
         if (!Store.manualMode(this) || hidden || locked) return
+        showChips()
         Store.manualPoints(this).forEachIndexed { i, p -> addMarker(i, p) }
         paintMarkers()
-        showChips()
     }
 
     private fun addMarker(i: Int, p: MPoint) {
@@ -1987,6 +1981,7 @@ class FloatService : AccessibilityService() {
             var sy = 0
             var tx = 0f
             var ty = 0f
+            var moved = false
             override fun onTouch(view: View, ev: MotionEvent): Boolean {
                 if (manualRunning) return false
                 when (ev.action) {
@@ -1995,16 +1990,24 @@ class FloatService : AccessibilityService() {
                         sy = mp.y
                         tx = ev.rawX
                         ty = ev.rawY
+                        moved = false
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        mp.x = sx + (ev.rawX - tx).toInt()
-                        mp.y = sy + (ev.rawY - ty).toInt()
-                        try {
-                            wm.updateViewLayout(view, mp)
-                        } catch (e: Exception) {
+                        val dx = (ev.rawX - tx).toInt()
+                        val dy = (ev.rawY - ty).toInt()
+                        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
+                        if (moved) {
+                            mp.x = sx + dx
+                            mp.y = sy + dy
+                            try {
+                                wm.updateViewLayout(view, mp)
+                            } catch (e: Exception) {
+                            }
                         }
                     }
-                    MotionEvent.ACTION_UP -> saveMarkerPos(i, mp.x, mp.y)
+                    MotionEvent.ACTION_UP -> {
+                        if (moved) saveMarkerPos(i, mp.x, mp.y) else showPointEditor(i)
+                    }
                 }
                 return true
             }
@@ -2057,7 +2060,20 @@ class FloatService : AccessibilityService() {
         val sz = markerSize()
         val x = (dm.widthPixels - sz) / 2
         val y = (dm.heightPixels / 3 + (l.size % 6) * (sz + dp(8))).coerceAtMost(dm.heightPixels - sz - dp(48))
-        l.add(MPoint(x, y, l.lastOrNull()?.ms ?: 2000))
+        l.add(MPoint(x, y, l.lastOrNull()?.ms ?: 1000))
+        Store.setManualPoints(this, l)
+        showMarkers()
+        refreshBubble()
+        openPanel("manual")
+    }
+
+    private fun removePoint() {
+        val l = Store.manualPoints(this)
+        if (l.isEmpty()) {
+            toast("Tidak ada titik")
+            return
+        }
+        l.removeAt(l.size - 1)
         Store.setManualPoints(this, l)
         showMarkers()
         refreshBubble()
@@ -2075,6 +2091,7 @@ class FloatService : AccessibilityService() {
             return
         }
         if (markers.size != n) showMarkers()
+        closeEditor()
         closePanel()
         manualRunning = true
         manualIdx = 0
@@ -2181,14 +2198,14 @@ class FloatService : AccessibilityService() {
             }
             paintMarkers()
             refreshBubble()
-            h.postDelayed(manualStepRun, Store.manualDelayMs(this).toLong())
+            h.postDelayed(manualStepRun, maxOf(pts[i].ms, 0).toLong())
         }
     }
 
-    // ----- Kotak template melayang (mode manual) -----
-    // Tidak hilang setelah diketuk: tiap ketukan menempel isi template berikutnya ke kolom ketik yang fokus,
-    // jadi kotak ini bisa dijadikan salah satu titik klik.
-    private var chipBar: View? = null
+    // ----- Template melayang (mode manual) -----
+    // Tiap template yang diaktifkan jadi satu tombol sendiri yang bisa digeser. Tidak hilang setelah diketuk:
+    // tiap ketukan menempel isi template berikutnya ke kolom ketik yang fokus, jadi bisa dijadikan titik klik.
+    private val chipBars = ArrayList<View>()
     private val chipRefs = ArrayList<Pair<TextView, Tpl>>()
 
     private fun chipLabel(t: Tpl): String {
@@ -2197,65 +2214,49 @@ class FloatService : AccessibilityService() {
         return t.name + "  " + (if (done >= total) 0 else done).toString() + "/" + total.toString()
     }
 
+    private fun chipPos(name: String, defX: Int, defY: Int): IntArray {
+        val j = getSharedPreferences("tpl", 0).getString("cpos", null)
+        try {
+            if (j != null) {
+                val o = JSONObject(j)
+                if (o.has(name)) {
+                    val a = o.getJSONArray(name)
+                    return intArrayOf(a.getInt(0), a.getInt(1))
+                }
+            }
+        } catch (e: Exception) {
+        }
+        return intArrayOf(defX, defY)
+    }
+
+    private fun saveChipPos(name: String, x: Int, y: Int) {
+        val sp = getSharedPreferences("tpl", 0)
+        val o = try {
+            JSONObject(sp.getString("cpos", null) ?: "{}")
+        } catch (e: Exception) {
+            JSONObject()
+        }
+        o.put(name, JSONArray().put(x).put(y))
+        sp.edit().putString("cpos", o.toString()).apply()
+    }
+
     private fun hideChips() {
-        chipBar?.let {
+        chipBars.forEach {
             try {
                 wm.removeView(it)
             } catch (e: Exception) {
             }
         }
-        chipBar = null
+        chipBars.clear()
         chipRefs.clear()
     }
 
     private fun showChips() {
-        if (!Store.manualChips(this)) return
         val items = Store.load(this)
-        if (items.isEmpty()) return
         val dm = resources.displayMetrics
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = glass(dp(18).toFloat())
-            setPadding(dp(6), dp(4), dp(6), dp(6))
-        }
-        val cp = lp().apply {
-            width = minOf(dp(150), dm.widthPixels / 2)
-            x = Store.chipX(this@FloatService, dm.widthPixels - dp(158))
-            y = Store.chipY(this@FloatService, dp(300))
-        }
-        val grip = txt("\u2630 Template", 11f, cGray(), true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(4), dp(8), dp(6))
-        }
-        grip.setOnTouchListener(object : View.OnTouchListener {
-            var sx = 0
-            var sy = 0
-            var tx = 0f
-            var ty = 0f
-            override fun onTouch(v: View, ev: MotionEvent): Boolean {
-                when (ev.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        sx = cp.x
-                        sy = cp.y
-                        tx = ev.rawX
-                        ty = ev.rawY
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        cp.x = sx + (ev.rawX - tx).toInt()
-                        cp.y = sy + (ev.rawY - ty).toInt()
-                        try {
-                            wm.updateViewLayout(bar, cp)
-                        } catch (e: Exception) {
-                        }
-                    }
-                    MotionEvent.ACTION_UP -> Store.setChipPos(this@FloatService, cp.x, cp.y)
-                }
-                return true
-            }
-        })
-        bar.addView(grip)
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var n = 0
         items.forEach { t ->
+            if (!t.show) return@forEach
             val chip = TextView(this).apply {
                 text = chipLabel(t)
                 textSize = 14f
@@ -2264,24 +2265,62 @@ class FloatService : AccessibilityService() {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER
-                setPadding(dp(10), dp(10), dp(10), dp(10))
+                minWidth = dp(96)
+                maxWidth = dp(190)
+                setPadding(dp(14), dp(12), dp(14), dp(12))
                 background = GradientDrawable().apply {
                     setColor(cBlue())
-                    cornerRadius = dp(12).toFloat()
+                    cornerRadius = dp(14).toFloat()
+                    setStroke(dp(1), Color.WHITE)
                 }
-                setOnClickListener { tplTap(t) }
             }
-            chipRefs.add(Pair(chip, t))
-            list.addView(chip, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
-        }
-        val sv = MaxScroll(this, dp(240))
-        sv.addView(list)
-        bar.addView(sv)
-        try {
-            wm.addView(bar, cp)
-            chipBar = bar
-        } catch (e: Exception) {
-            chipRefs.clear()
+            val p0 = chipPos(t.name, dm.widthPixels - dp(170), dp(200) + n * dp(60))
+            n++
+            val cp = lp().apply {
+                x = p0[0]
+                y = p0[1]
+            }
+            chip.setOnTouchListener(object : View.OnTouchListener {
+                var sx = 0
+                var sy = 0
+                var tx = 0f
+                var ty = 0f
+                var moved = false
+                override fun onTouch(v: View, ev: MotionEvent): Boolean {
+                    when (ev.action) {
+                        MotionEvent.ACTION_DOWN -> {
+                            sx = cp.x
+                            sy = cp.y
+                            tx = ev.rawX
+                            ty = ev.rawY
+                            moved = false
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            val dx = (ev.rawX - tx).toInt()
+                            val dy = (ev.rawY - ty).toInt()
+                            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
+                            if (moved) {
+                                cp.x = sx + dx
+                                cp.y = sy + dy
+                                try {
+                                    wm.updateViewLayout(v, cp)
+                                } catch (e: Exception) {
+                                }
+                            }
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            if (moved) saveChipPos(t.name, cp.x, cp.y) else tplTap(t)
+                        }
+                    }
+                    return true
+                }
+            })
+            try {
+                wm.addView(chip, cp)
+                chipBars.add(chip)
+                chipRefs.add(Pair(chip, t))
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -2306,38 +2345,133 @@ class FloatService : AccessibilityService() {
         chipRefs.forEach { if (keyOf(it.second) == key) it.first.text = chipLabel(it.second) }
     }
 
-    private fun mdLabel(ms: Int): String =
-        if (ms == 0) "Turbo (tanpa jeda antar klik)" else ms.toString() + " ms antar klik"
+    // Aktif/nonaktifkan satu template di layar, panel tetap di depan
+    private fun setTplShow(i: Int, on: Boolean) {
+        val all = Store.load(this)
+        if (i !in all.indices) return
+        val o = all[i]
+        all[i] = Tpl(o.name, o.text, o.mode, o.loop, on)
+        Store.save(this, all)
+        showMarkers()
+        raisePanel()
+    }
 
-    // Isi jeda antar klik dalam milidetik
-    private fun showManualEditor() {
+    // Pasang ulang panel supaya berada di depan titik dan template, tanpa mengubah isinya
+    private fun raisePanel() {
+        val v = panel ?: return
+        val pp = panelLp ?: return
+        try {
+            wm.removeView(v)
+            wm.addView(v, pp)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun mdLabel(ms: Int): String =
+        if (ms == 0) "Turbo (tanpa jeda setelah klik)" else ms.toString() + " ms setelah klik"
+
+    private fun savePointMs(i: Int, ms: Int) {
+        val l = Store.manualPoints(this)
+        if (i !in l.indices) return
+        l[i] = MPoint(l[i].x, l[i].y, ms.coerceIn(0, 3600000))
+        Store.setManualPoints(this, l)
+    }
+
+    // Ketuk titik bernomor: atur jeda titik itu (slider + Turbo)
+    private fun showPointEditor(i: Int) {
         closeEditor()
+        val pts = Store.manualPoints(this)
+        if (i !in pts.indices) return
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = glass(dp(28).toFloat())
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+        box.addView(txt("Titik " + (i + 1).toString(), 20f, cPrimary(), true))
+        box.addView(
+            txt("Jeda setelah titik ini diklik, sebelum titik berikutnya.", 12f, cGray(), false),
+            mlp(WRAP, WRAP, 0, dp(2), 0, 0)
+        )
+        val lbl = txt(mdLabel(pts[i].ms), 14f, cBlue(), true).apply { setPadding(0, dp(10), 0, dp(4)) }
+        box.addView(lbl)
+        val sb = SeekBar(this).apply {
+            max = 100
+            progress = minOf(100, pts[i].ms / 50)
+            progressTintList = ColorStateList.valueOf(cBlue())
+            thumbTintList = ColorStateList.valueOf(cBlue())
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, pr: Int, u: Boolean) {
+                    if (!u) return
+                    lbl.text = mdLabel(pr * 50)
+                    savePointMs(i, pr * 50)
+                }
+
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        box.addView(sb, mlp(MATCH, WRAP, 0, dp(4), 0, 0))
+        box.addView(
+            txt("Kiri = Turbo (tanpa jeda), kanan = lambat (maks 5 detik). Lebih lama, pakai Isi ms manual.", 12f, cGray(), false),
+            mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+        )
+        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btns.addView(pill("Isi ms manual", cBtnGray(), cPrimary()) { showMsEditor(i) })
+        btns.addView(pill("Tutup", cBlue(), Color.WHITE) { closeEditor() })
+        box.addView(btns, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
+
+        val dm = resources.displayMetrics
+        val ep = WindowManager.LayoutParams(
+            minOf(dp(320), dm.widthPixels - dp(24)),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
+        )
+        // taruh di sisi layar yang berlawanan dengan titik supaya titiknya tidak tertutup
+        val my = if (i < markerLps.size) markerLps[i].y else 0
+        val onTop = my > dm.heightPixels / 2
+        ep.gravity = (if (onTop) Gravity.TOP else Gravity.BOTTOM) or Gravity.CENTER_HORIZONTAL
+        ep.y = dp(60)
+        box.setOnTouchListener { v, ev ->
+            if (ev.action == MotionEvent.ACTION_OUTSIDE) {
+                v.postDelayed({
+                    if (editor === v) closeEditor()
+                }, 120)
+            }
+            false
+        }
+        wm.addView(box, ep)
+        editor = box
+    }
+
+    // Isi jeda titik dalam milidetik
+    private fun showMsEditor(i: Int) {
+        closeEditor()
+        val pts = Store.manualPoints(this)
+        if (i !in pts.indices) return
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = glass(dp(28).toFloat())
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        box.addView(txt("Jeda antar klik", 20f, cPrimary(), true))
+        box.addView(txt("Jeda titik " + (i + 1).toString(), 20f, cPrimary(), true))
         box.addView(
             txt("Isi dalam milidetik (1000 = 1 detik). 0 = Turbo. Maksimal 3600000.", 12f, cGray(), false),
             mlp(WRAP, WRAP, 0, dp(4), 0, 0)
         )
         val et = field("milidetik", false).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
-            setText(Store.manualDelayMs(this@FloatService).toString())
+            setText(pts[i].ms.toString())
             setSelection(text.length)
         }
         box.addView(et, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
         val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btns.addView(pill("Batal", cBtnGray(), cPrimary()) {
-            closeEditor()
-            openPanel("manual")
-        })
+        btns.addView(pill("Batal", cBtnGray(), cPrimary()) { showPointEditor(i) })
         btns.addView(pill("Simpan", cBlue(), Color.WHITE) {
             val v = (et.text.toString().toLongOrNull() ?: 0L).coerceIn(0L, 3600000L).toInt()
-            Store.setManualDelayMs(this, v)
-            closeEditor()
-            openPanel("manual")
+            savePointMs(i, v)
+            showPointEditor(i)
         })
         box.addView(btns, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
 
@@ -2370,7 +2504,7 @@ class FloatService : AccessibilityService() {
         }
         box.addView(mrow, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
         box.addView(
-            txt("Template = ketik otomatis. Manual = khusus klik titik yang kamu atur sendiri, terpisah dari pengaturan ketik.", 12f, cGray(), false),
+            txt("Template = ketik otomatis. Manual = klik titik yang kamu atur sendiri. Ketuk salah satu untuk langsung pindah.", 12f, cGray(), false),
             mlp(WRAP, WRAP, 0, dp(4), 0, 0)
         )
     }
@@ -2469,9 +2603,9 @@ class FloatService : AccessibilityService() {
             val name = if (nm.isEmpty()) "Template " + (all.size + 1).toString() else nm
             if (cur != null && index >= 0 && index < all.size) {
                 pos.remove(keyOf(all[index]))
-                all[index] = Tpl(name, tx, selMode, selLoop)
+                all[index] = Tpl(name, tx, selMode, selLoop, cur.show)
             } else {
-                all.add(Tpl(name, tx, selMode, selLoop))
+                all.add(Tpl(name, tx, selMode, selLoop, Store.manualMode(this)))
             }
             Store.save(this, all)
             if (Store.manualMode(this)) showMarkers()
