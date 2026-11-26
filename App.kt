@@ -2,6 +2,7 @@ package com.wans.tpl
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.GestureDescription
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
@@ -64,6 +65,9 @@ import org.json.JSONObject
 
 // ===== Data template =====
 class Tpl(val name: String, val text: String, val mode: Int = 0, val loop: Boolean = false)
+
+// Titik klik mode manual: posisi layar (x, y) dan jeda (ms) setelah titik ini diklik sebelum titik berikutnya
+class MPoint(val x: Int, val y: Int, val ms: Int)
 
 // Pola angka: {000} (cara lama) atau angka langsung di dalam kalimat, contoh pesan000.
 // Tanpa kurung, yang dipakai adalah deretan angka paling belakang (maks 9 digit).
@@ -144,6 +148,45 @@ object Store {
             a.put(o)
         }
         c.getSharedPreferences("tpl", 0).edit().putString("data", a.toString()).apply()
+    }
+
+    // ----- Mode manual (klik titik berurutan) -----
+    fun manualMode(c: Context): Boolean = c.getSharedPreferences("tpl", 0).getBoolean("mmode", false)
+
+    fun setManualMode(c: Context, v: Boolean) {
+        c.getSharedPreferences("tpl", 0).edit().putBoolean("mmode", v).apply()
+    }
+
+    fun manualLoop(c: Context): Boolean = c.getSharedPreferences("tpl", 0).getBoolean("mloop", false)
+
+    fun setManualLoop(c: Context, v: Boolean) {
+        c.getSharedPreferences("tpl", 0).edit().putBoolean("mloop", v).apply()
+    }
+
+    fun manualPoints(c: Context): MutableList<MPoint> {
+        val out = mutableListOf<MPoint>()
+        val j = c.getSharedPreferences("tpl", 0).getString("mpts", null) ?: return out
+        try {
+            val a = JSONArray(j)
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                out.add(MPoint(o.getInt("x"), o.getInt("y"), o.optInt("ms", 2000)))
+            }
+        } catch (e: Exception) {
+        }
+        return out
+    }
+
+    fun setManualPoints(c: Context, l: List<MPoint>) {
+        val a = JSONArray()
+        l.forEach {
+            val o = JSONObject()
+            o.put("x", it.x)
+            o.put("y", it.y)
+            o.put("ms", it.ms)
+            a.put(o)
+        }
+        c.getSharedPreferences("tpl", 0).edit().putString("mpts", a.toString()).apply()
     }
 
     // posisi bubble terakhir (-1 = belum pernah disimpan)
@@ -957,9 +1000,12 @@ class FloatService : AccessibilityService() {
             closeEditor()
             hideCloseTarget()
             pause()
+            manualStop()
+            hideMarkers()
             bubble?.visibility = View.GONE
         } else if (!hidden) {
             bubble?.visibility = View.VISIBLE
+            showMarkers()
         }
     }
     private var turboCount = 0
@@ -1227,6 +1273,7 @@ class FloatService : AccessibilityService() {
         wm.addView(b, bp)
         bubble = b
         refreshBubble()
+        if (Store.manualMode(this)) showMarkers()
 
         // supaya bisa mendeteksi jendela keyboard (untuk opsi "jeda kalau keyboard tertutup")
         try {
@@ -1346,6 +1393,8 @@ class FloatService : AccessibilityService() {
 
     private fun hideBubble() {
         pause()
+        manualStop()
+        hideMarkers()
         closePanel()
         closeEditor()
         bubble?.let {
@@ -1375,6 +1424,7 @@ class FloatService : AccessibilityService() {
         } catch (e: Exception) {
         }
         hidden = false
+        if (Store.manualMode(this)) showMarkers()
         refreshBubble()
     }
 
@@ -1396,6 +1446,20 @@ class FloatService : AccessibilityService() {
 
     private fun refreshBubble() {
         val l = bubble ?: return
+        if (Store.manualMode(this)) {
+            // Mode manual: bubble menampilkan "M" atau nomor titik yang sedang diklik
+            val n = Store.manualPoints(this).size
+            l.ringColor = cBlue()
+            l.trackColor = if (dark()) Color.parseColor("#44FFFFFF") else Color.parseColor("#26000000")
+            l.progress = 0f
+            l.showTrack = false
+            l.textSize = if (manualRunning) 13f else 20f
+            l.text = if (manualRunning) (minOf(manualIdx + 1, maxOf(n, 1))).toString() + "/" + n.toString() else "M"
+            l.setTextColor(if (manualRunning) cBlue() else cPrimary())
+            l.background = bubbleBg(manualRunning)
+            l.invalidate()
+            return
+        }
         l.ringColor = cBlue()
         l.trackColor = if (dark()) Color.parseColor("#44FFFFFF") else Color.parseColor("#26000000")
         if (curKey != "" && lines.isNotEmpty()) {
@@ -1422,7 +1486,12 @@ class FloatService : AccessibilityService() {
             closeEditor()
             return
         }
-        if (panel != null) closePanel() else openPanel("list")
+        if (manualRunning) {
+            manualStop()
+            openPanel("manual")
+            return
+        }
+        if (panel != null) closePanel() else openPanel(homePanel())
     }
 
     // ----- panel daftar template / pengaturan -----
@@ -1432,7 +1501,21 @@ class FloatService : AccessibilityService() {
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         if (mode == "set") {
-            box.addView(txt("Kecepatan mengetik", 20f, cPrimary(), true))
+            box.addView(txt("Mode", 20f, cPrimary(), true))
+            val mm = Store.manualMode(this)
+            val mrow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            listOf("Template", "Manual").forEachIndexed { i, nm ->
+                val sel = (i == 1) == mm
+                mrow.addView(pill(nm, if (sel) cBlue() else cBtnGray(), if (sel) Color.WHITE else cPrimary()) {
+                    switchMode(i == 1)
+                })
+            }
+            box.addView(mrow, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+            box.addView(
+                txt("Template = ketik otomatis. Manual = klik titik yang kamu tentukan, berurutan, dengan jeda detik.", 12f, cGray(), false),
+                mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+            )
+            box.addView(txt("Kecepatan mengetik", 20f, cPrimary(), true), mlp(WRAP, WRAP, 0, dp(16), 0, 0))
             val lbl = txt(msLabel(Store.delayMs(this)), 14f, cBlue(), true).apply {
                 setPadding(0, dp(10), 0, dp(4))
             }
@@ -1552,8 +1635,90 @@ class FloatService : AccessibilityService() {
                 mlp(WRAP, WRAP, 0, dp(4), 0, 0)
             )
             val done = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            done.addView(pill("Selesai", cBlue(), Color.WHITE) { openPanel("list") })
+            done.addView(pill("Selesai", cBlue(), Color.WHITE) { openPanel(homePanel()) })
             box.addView(done, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
+        } else if (mode == "manual") {
+            val pts = Store.manualPoints(this)
+            val ml = Store.manualLoop(this)
+            val head = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(txt("Mode manual", 20f, cPrimary(), true))
+            col.addView(
+                txt(
+                    if (manualRunning) "Berjalan: titik " + (minOf(manualIdx + 1, maxOf(pts.size, 1))).toString() + " dari " + pts.size.toString()
+                    else pts.size.toString() + " titik" + (if (ml) " \u00B7 ulang" else " \u00B7 sekali"),
+                    12f, cGray(), false
+                )
+            )
+            head.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+            head.addView(circleBtn("\u2699", cBtnGray(), 36) { openPanel("set") })
+            box.addView(head)
+
+            val r1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            r1.addView(pill("+ Titik", cBtnGray(), cPrimary()) { addPoint() })
+            r1.addView(pill("Atur jeda", cBtnGray(), cPrimary()) {
+                if (pts.isEmpty()) {
+                    toast("Belum ada titik. Ketuk + Titik dulu")
+                } else {
+                    closePanel()
+                    showManualEditor()
+                }
+            })
+            box.addView(r1, mlp(MATCH, WRAP, 0, dp(12), 0, 0))
+
+            val r2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            listOf("Sekali", "Ulang \u21BB").forEachIndexed { i, nm ->
+                val sel = (i == 1) == ml
+                r2.addView(pill(nm, if (sel) cBlue() else cBtnGray(), if (sel) Color.WHITE else cPrimary()) {
+                    Store.setManualLoop(this, i == 1)
+                    openPanel("manual")
+                })
+            }
+            box.addView(r2, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+
+            val r3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            if (manualRunning) {
+                r3.addView(pill("Berhenti", cRed(), Color.WHITE) {
+                    manualStop()
+                    openPanel("manual")
+                })
+            } else {
+                r3.addView(pill("Mulai", cGreen(), Color.WHITE) { manualStart() })
+            }
+            box.addView(r3, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+
+            // ketuk dua kali: pertama minta konfirmasi, kedua baru menghapus
+            var armed = false
+            val clr = pill("Hapus semua titik", cBtnGray(), cPrimary()) {}
+            clr.setOnClickListener {
+                if (!armed) {
+                    armed = true
+                    clr.text = "Yakin?"
+                    clr.postDelayed({
+                        armed = false
+                        clr.text = "Hapus semua titik"
+                    }, 3000)
+                } else {
+                    manualStop()
+                    Store.setManualPoints(this, emptyList())
+                    showMarkers()
+                    refreshBubble()
+                    openPanel("manual")
+                }
+            }
+            val r4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            r4.addView(clr)
+            box.addView(r4, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+            box.addView(
+                txt(
+                    "Ketuk + Titik, lalu geser angka biru ke tempat yang mau diklik. Klik jalan berurutan: titik berikutnya baru diklik setelah titik sebelumnya selesai dan jedanya habis. Ketuk bubble untuk berhenti.",
+                    12f, cGray(), false
+                ),
+                mlp(WRAP, WRAP, 0, dp(8), 0, 0)
+            )
         } else {
             val head = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -1699,6 +1864,344 @@ class FloatService : AccessibilityService() {
         panel = null
         panelMode = ""
         panelInfo = null
+    }
+
+    // ===== Mode manual: klik titik berurutan =====
+    private var manualRunning = false
+    private var manualIdx = 0
+    private var manualGen = 0
+    private val markers = ArrayList<TextView>()
+    private val markerLps = ArrayList<WindowManager.LayoutParams>()
+    private val manualStepRun = Runnable { manualStep() }
+
+    private fun homePanel(): String = if (Store.manualMode(this)) "manual" else "list"
+
+    private fun markerSize(): Int = dp(44)
+
+    private fun switchMode(on: Boolean) {
+        if (Store.manualMode(this) == on) return
+        pause()
+        manualStop()
+        Store.setManualMode(this, on)
+        if (on) showMarkers() else hideMarkers()
+        refreshBubble()
+        openPanel("set")
+    }
+
+    private fun hideMarkers() {
+        markers.forEach {
+            try {
+                wm.removeView(it)
+            } catch (e: Exception) {
+            }
+        }
+        markers.clear()
+        markerLps.clear()
+    }
+
+    private fun showMarkers() {
+        hideMarkers()
+        if (!Store.manualMode(this) || hidden || locked) return
+        Store.manualPoints(this).forEachIndexed { i, p -> addMarker(i, p) }
+        paintMarkers()
+    }
+
+    private fun addMarker(i: Int, p: MPoint) {
+        val sz = markerSize()
+        val v = TextView(this).apply {
+            text = (i + 1).toString()
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#E6007AFF"))
+                setStroke(dp(2), Color.WHITE)
+            }
+        }
+        val mp = WindowManager.LayoutParams(
+            sz,
+            sz,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = p.x
+            y = p.y
+        }
+        v.setOnTouchListener(object : View.OnTouchListener {
+            var sx = 0
+            var sy = 0
+            var tx = 0f
+            var ty = 0f
+            override fun onTouch(view: View, ev: MotionEvent): Boolean {
+                if (manualRunning) return false
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        sx = mp.x
+                        sy = mp.y
+                        tx = ev.rawX
+                        ty = ev.rawY
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        mp.x = sx + (ev.rawX - tx).toInt()
+                        mp.y = sy + (ev.rawY - ty).toInt()
+                        try {
+                            wm.updateViewLayout(view, mp)
+                        } catch (e: Exception) {
+                        }
+                    }
+                    MotionEvent.ACTION_UP -> saveMarkerPos(i, mp.x, mp.y)
+                }
+                return true
+            }
+        })
+        try {
+            wm.addView(v, mp)
+            markers.add(v)
+            markerLps.add(mp)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun saveMarkerPos(i: Int, x: Int, y: Int) {
+        val l = Store.manualPoints(this)
+        if (i !in l.indices) return
+        l[i] = MPoint(x, y, l[i].ms)
+        Store.setManualPoints(this, l)
+    }
+
+    // Titik yang sedang diklik berwarna hijau, sisanya biru
+    private fun paintMarkers() {
+        markers.forEachIndexed { j, v ->
+            val on = manualRunning && j == manualIdx
+            (v.background as? GradientDrawable)?.setColor(
+                if (on) Color.parseColor("#E634C759") else Color.parseColor("#E6007AFF")
+            )
+        }
+    }
+
+    // Saat berjalan, penanda tidak boleh menangkap sentuhan supaya klik tembus ke aplikasi di bawahnya
+    private fun setMarkersTouchable(t: Boolean) {
+        markers.forEachIndexed { i, v ->
+            val mp = markerLps[i]
+            mp.flags = if (t) WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            try {
+                wm.updateViewLayout(v, mp)
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    private fun addPoint() {
+        val l = Store.manualPoints(this)
+        if (l.size >= 20) {
+            toast("Maksimal 20 titik")
+            return
+        }
+        val dm = resources.displayMetrics
+        val sz = markerSize()
+        val x = (dm.widthPixels - sz) / 2
+        val y = (dm.heightPixels / 3 + (l.size % 6) * (sz + dp(8))).coerceAtMost(dm.heightPixels - sz - dp(48))
+        l.add(MPoint(x, y, l.lastOrNull()?.ms ?: 2000))
+        Store.setManualPoints(this, l)
+        showMarkers()
+        refreshBubble()
+        openPanel("manual")
+    }
+
+    private fun manualStart() {
+        if (Build.VERSION.SDK_INT < 24) {
+            toast("Mode manual butuh Android 7+")
+            return
+        }
+        val n = Store.manualPoints(this).size
+        if (n == 0) {
+            toast("Belum ada titik. Ketuk + Titik dulu")
+            return
+        }
+        if (markers.size != n) showMarkers()
+        closePanel()
+        manualRunning = true
+        manualIdx = 0
+        manualGen++
+        setMarkersTouchable(false)
+        paintMarkers()
+        refreshBubble()
+        h.removeCallbacks(manualStepRun)
+        h.postDelayed(manualStepRun, 300)
+    }
+
+    private fun manualStop() {
+        val was = manualRunning
+        manualRunning = false
+        manualGen++
+        h.removeCallbacks(manualStepRun)
+        if (was) setMarkersTouchable(true)
+        paintMarkers()
+        if (bubble != null) refreshBubble()
+    }
+
+    // Satu klik. done(true) dipanggil setelah klik benar-benar selesai, done(false) kalau dibatalkan/gagal.
+    private fun manualTap(x: Float, y: Float, done: (Boolean) -> Unit) {
+        if (Build.VERSION.SDK_INT < 24) {
+            done(false)
+            return
+        }
+        try {
+            val path = Path()
+            path.moveTo(x, y)
+            val g = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+                .build()
+            val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    done(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    done(false)
+                }
+            }, null)
+            if (!ok) done(false)
+        } catch (e: Exception) {
+            done(false)
+        }
+    }
+
+    // Urutan: klik titik i -> tunggu klik selesai -> tunggu jeda titik i -> baru titik i+1.
+    // Titik berikutnya tidak pernah diklik sebelum titik sebelumnya selesai.
+    private fun manualStep() {
+        if (!manualRunning) return
+        val pts = Store.manualPoints(this)
+        if (pts.isEmpty() || markers.size != pts.size) {
+            manualStop()
+            return
+        }
+        if (manualIdx >= pts.size) manualIdx = 0
+        val i = manualIdx
+        val v = markers[i]
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        val cx = loc[0] + (if (v.width > 0) v.width else markerSize()) / 2f
+        val cy = loc[1] + (if (v.height > 0) v.height else markerSize()) / 2f
+        val gen = manualGen
+        paintMarkers()
+        refreshBubble()
+        manualTap(cx, cy) { ok ->
+            if (!manualRunning || gen != manualGen) return@manualTap
+            if (!ok) {
+                manualStop()
+                toast("Klik dibatalkan, dijeda. Ketuk bubble > Mulai")
+                return@manualTap
+            }
+            manualIdx = i + 1
+            if (manualIdx >= pts.size) {
+                if (Store.manualLoop(this)) {
+                    manualIdx = 0
+                } else {
+                    manualStop()
+                    celebrate()
+                    toast("Selesai")
+                    return@manualTap
+                }
+            }
+            paintMarkers()
+            refreshBubble()
+            h.postDelayed(manualStepRun, maxOf(pts[i].ms, 0).toLong())
+        }
+    }
+
+    // Atur jeda (detik) tiap titik
+    private fun showManualEditor() {
+        closeEditor()
+        val pts = Store.manualPoints(this)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = glass(dp(28).toFloat())
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        box.addView(txt("Jeda tiap titik", 20f, cPrimary(), true))
+        box.addView(
+            txt("Jeda = berapa detik menunggu setelah titik itu diklik, sebelum titik berikutnya. Boleh pakai desimal, contoh 0.5", 12f, cGray(), false),
+            mlp(WRAP, WRAP, 0, dp(4), 0, 0)
+        )
+        fun secStr(ms: Int): String = if (ms % 1000 == 0) (ms / 1000).toString() else (ms / 1000.0).toString()
+        fun numField(hintText: String): EditText = field(hintText, false).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        }
+
+        val ets = ArrayList<EditText>()
+        val etAll = numField("Semua titik (detik)")
+        val allRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        allRow.addView(etAll, LinearLayout.LayoutParams(0, WRAP, 1f))
+        allRow.addView(
+            pill("Samakan", cBtnGray(), cPrimary()) {
+                val t = etAll.text.toString().trim()
+                if (t.isNotEmpty()) ets.forEach { it.setText(t) }
+            },
+            LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(dp(8), 0, 0, 0) }
+        )
+        box.addView(allRow, mlp(MATCH, WRAP, 0, dp(10), 0, 0))
+
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pts.forEachIndexed { i, p ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(txt("Titik " + (i + 1).toString(), 15f, cPrimary(), true), LinearLayout.LayoutParams(0, WRAP, 1f))
+            val et = numField("detik")
+            et.setText(secStr(p.ms))
+            ets.add(et)
+            row.addView(et, LinearLayout.LayoutParams(dp(96), WRAP))
+            row.addView(txt(" detik", 13f, cGray(), false))
+            list.addView(row, mlp(MATCH, WRAP, 0, dp(8), 0, 0))
+        }
+        val sv = MaxScroll(this, dp(260))
+        sv.addView(list)
+        box.addView(sv, mlp(MATCH, WRAP, 0, dp(6), 0, 0))
+
+        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btns.addView(pill("Batal", cBtnGray(), cPrimary()) {
+            closeEditor()
+            openPanel("manual")
+        })
+        btns.addView(pill("Simpan", cBlue(), Color.WHITE) {
+            val cur = Store.manualPoints(this)
+            val out = ArrayList<MPoint>()
+            cur.forEachIndexed { i, p ->
+                val s = ets.getOrNull(i)?.text?.toString()?.trim()?.replace(',', '.') ?: ""
+                val v = s.toDoubleOrNull()
+                out.add(MPoint(p.x, p.y, if (v != null) (v.coerceIn(0.0, 3600.0) * 1000).toInt() else p.ms))
+            }
+            Store.setManualPoints(this, out)
+            closeEditor()
+            openPanel("manual")
+        })
+        box.addView(btns, mlp(MATCH, WRAP, 0, dp(14), 0, 0))
+
+        val sw = resources.displayMetrics.widthPixels
+        val ep = WindowManager.LayoutParams(
+            minOf(dp(320), sw - dp(24)),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            0,
+            PixelFormat.TRANSLUCENT
+        )
+        ep.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        ep.y = dp(60)
+        ep.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+        blur(ep)
+        wm.addView(box, ep)
+        editor = box
     }
 
     // ----- editor template (nama + isi) -----
@@ -2379,6 +2882,7 @@ class FloatService : AccessibilityService() {
         hideCloseTarget()
         closePanel()
         closeEditor()
+        hideMarkers()
         bubble?.let {
             try {
                 wm.removeView(it)
