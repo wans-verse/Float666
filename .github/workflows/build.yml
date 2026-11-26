@@ -82,7 +82,7 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <string name="app_name">WansForce</string>
-              <string name="acc_desc">Mengetik template otomatis di kolom yang sedang aktif</string>
+              <string name="acc_desc">Mengetik template otomatis di kolom yang sedang aktif dan mengklik titik layar pada mode manual</string>
           </resources>
           EOF
 
@@ -146,6 +146,7 @@ jobs:
               android:accessibilityFeedbackType="feedbackGeneric"
               android:accessibilityFlags="flagDefault"
               android:canRetrieveWindowContent="true"
+              android:canPerformGestures="true"
               android:notificationTimeout="0" />
           EOF
 
